@@ -12,7 +12,25 @@ struct HostConfig {
   bool isComplete() const { return address.length() && user.length() && port; }
 };
 
+struct WifiConfig {
+  String ssid;
+  String password;
+
+  bool isComplete() const { return ssid.length() > 0; }
+};
+
 namespace settings {
+
+WifiConfig loadWifi();
+void saveWifi(const WifiConfig& wifi);
+
+// Display rotation (0-3); 1 and 3 are the two portrait orientations.
+uint8_t rotation();
+void saveRotation(uint8_t rotation);
+
+// Password for the settings web page. Empty means the page is open.
+String webPassword();
+void saveWebPassword(const String& password);
 
 HostConfig loadHost();
 void saveHost(const HostConfig& host);

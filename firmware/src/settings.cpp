@@ -2,22 +2,75 @@
 
 #include <Preferences.h>
 
+#include "board.h"
+
 namespace {
 
 const char* NS = "rhino";
+
+// Preferences::getString logs an error for a missing key; absent is normal here.
+String str(Preferences& p, const char* key) { return p.isKey(key) ? p.getString(key, "") : String(); }
 
 }  // namespace
 
 namespace settings {
 
+WifiConfig loadWifi() {
+  Preferences p;
+  p.begin(NS, true);
+  WifiConfig w;
+  w.ssid = str(p, "w_ssid");
+  w.password = str(p, "w_pass");
+  p.end();
+  return w;
+}
+
+void saveWifi(const WifiConfig& wifi) {
+  Preferences p;
+  p.begin(NS, false);
+  p.putString("w_ssid", wifi.ssid);
+  p.putString("w_pass", wifi.password);
+  p.end();
+}
+
+uint8_t rotation() {
+  Preferences p;
+  p.begin(NS, true);
+  uint8_t r = p.getUChar("rotation", DEFAULT_ROTATION);
+  p.end();
+  return r & 0x03;
+}
+
+void saveRotation(uint8_t rotation) {
+  Preferences p;
+  p.begin(NS, false);
+  p.putUChar("rotation", rotation & 0x03);
+  p.end();
+}
+
+String webPassword() {
+  Preferences p;
+  p.begin(NS, true);
+  String pw = str(p, "web_pw");
+  p.end();
+  return pw;
+}
+
+void saveWebPassword(const String& password) {
+  Preferences p;
+  p.begin(NS, false);
+  p.putString("web_pw", password);
+  p.end();
+}
+
 HostConfig loadHost() {
   Preferences p;
   p.begin(NS, true);
   HostConfig h;
-  h.name = p.getString("h_name", "");
-  h.address = p.getString("h_addr", "");
+  h.name = str(p, "h_name");
+  h.address = str(p, "h_addr");
   h.port = p.getUShort("h_port", 22);
-  h.user = p.getString("h_user", "");
+  h.user = str(p, "h_user");
   p.end();
   return h;
 }
@@ -39,7 +92,7 @@ void saveHost(const HostConfig& host) {
 String pinnedHostKey() {
   Preferences p;
   p.begin(NS, true);
-  String fp = p.getString("h_fp", "");
+  String fp = str(p, "h_fp");
   p.end();
   return fp;
 }
@@ -61,7 +114,7 @@ void forgetHostKey() {
 String deviceKey() {
   Preferences p;
   p.begin(NS, true);
-  String k = p.getString("dev_key", "");
+  String k = str(p, "dev_key");
   p.end();
   return k;
 }

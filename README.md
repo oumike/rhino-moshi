@@ -32,7 +32,7 @@ opens a tunnel (an SSH `direct-tcpip` channel, the same thing `ssh -W` does) to
 1. **Enable SSH** on the host if it isn't already (macOS: System Settings →
    General → Sharing → Remote Login).
 2. **Authorize the X4's key.** On first boot the X4 generates an ed25519 key
-   pair. The private half never leaves the device. Open the X4's setup page
+   pair. The private half never leaves the device. Open the X4's settings page
    (see [Firmware](#firmware)), copy the `authorized_keys` line it shows, and
    append it to `~/.ssh/authorized_keys` on each host:
 
@@ -47,7 +47,7 @@ opens a tunnel (an SSH `direct-tcpip` channel, the same thing `ssh -W` does) to
    shell or command exit immediately. Requires OpenSSH 7.2+. A stolen X4 can do what the X4 already
    does, and nothing more. To revoke it, delete the line.
 3. **Add the host on the X4:** a name, address, SSH port and user, entered in
-   the setup page or with the on-screen keyboard.
+   the settings page or with the on-screen keyboard.
 4. **Confirm the host key** on first connect. The X4 shows the host's SHA256
    fingerprint. Compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
    on the host, then press Trust. The key is pinned. If it later changes, the
@@ -63,7 +63,7 @@ opens a tunnel (an SSH `direct-tcpip` channel, the same thing `ssh -W` does) to
 | Spoofed host / man-in-the-middle | The host key is pinned on first use, and any change blocks the connection. |
 | Lost or stolen X4 | The key is restricted to `permitopen="127.0.0.1:24543"`. Remove its `authorized_keys` line on each host. |
 | Someone reads the key off the X4 | The private key lives in NVS. Enabling ESP32 flash encryption is optional hardening; without it, physical access is game over, and the restriction above bounds the damage. |
-| Setup page abuse | The setup portal runs only on request (a button combo or Settings), on the X4's own access point, and times out. It shows the public key and accepts host entries; the private key can't be read or exported. |
+| Settings page abuse | The page is open on the LAN by default; set a page password on it to require HTTP Basic auth. The open setup access point runs only on a fresh install or with Back held at boot (physical access). The page shows the public key and accepts settings; the private key can't be read or exported. |
 
 ## Constraints that shape the design
 
@@ -74,7 +74,7 @@ opens a tunnel (an SSH `direct-tcpip` channel, the same thing `ssh -W` does) to
 | An `/events` agent watch follows **one agent session**. | The device re-points its single agent watch at whichever agent needs it most (see below). |
 | E-paper: ~1.7 s full refresh, partial refresh for small regions. | Redraws only when something a human cares about changes. Ephemeral "Thinking… (12s)" lines are throttled. |
 | Six usable buttons plus power, no touch. | List navigation plus contextual soft keys. Typing uses an on-screen keyboard. |
-| No discovery protocol in moshi-hook. | Hosts are configured on the device through the setup page or the on-screen keyboard. |
+| No discovery protocol in moshi-hook. | Hosts are configured on the device through the settings page or the on-screen keyboard. |
 
 ## How the firmware uses the gateway
 
@@ -145,10 +145,20 @@ from `main`. It adds:
   interface, so it runs over an SSH channel instead of a `WiFiClient`.
   (Alternative: a loopback listener on the X4 that relays to the channel, so
   stock libraries work unchanged. The spike decides.)
-- **Setup page:** a WiFiManager-style captive portal on the X4's own access
-  point. It handles Wi-Fi credentials, shows the `authorized_keys` line, and
-  takes host entries (name, address, port, user). It opens on first boot or
-  from Settings, and closes after 10 minutes.
+- **Settings page:** a plain web page at `http://rhino-x4.local` on the LAN.
+  It handles Wi-Fi credentials, shows the `authorized_keys` line, takes host
+  entries (name, address, port, user), shows and forgets the pinned host key,
+  sets orientation (portrait by default), and sets an optional page password
+  (HTTP Basic auth, user `admin`; none by default).
+- **Setup mode:** with no saved Wi-Fi (fresh install), or with Back held at
+  boot, the X4 runs an open access point `Rhino-X4-Setup` and serves the same
+  page at `http://192.168.4.1`. There is no captive portal: join and browse
+  there yourself. Saving restarts the X4 onto the saved network.
+- **Backup/restore:** the settings page downloads and restores a JSON backup
+  in the browser, and writes or reads one on the SD card at
+  `/moshi/rhino-x4-backup.json`. A backup holds every setting, including the
+  Wi-Fi and page passwords and the X4's SSH private key, so a restored X4
+  needs no re-authorizing on hosts. The file must be kept private.
 
 ### Screens
 
@@ -187,7 +197,7 @@ from `main`. It adds:
   Cancel.
 - **Usage:** per-agent rate-limit windows with reset times.
 - **Settings:** rotation, button calibration, hosts, canned prompts, open
-  the setup page, show the X4's key fingerprint, regenerate the key (every
+  the settings page, show the X4's key fingerprint, regenerate the key (every
   host must re-authorize), and reset Wi-Fi.
 
 ### Refresh policy
@@ -219,7 +229,7 @@ from `main`. It adds:
 1. **Spike:** use `ssh -W 127.0.0.1:24543 host` plus `websocat` to capture
    frames; on the X4, get libssh to open a channel and fetch `/v1/version`
    while measuring heap.
-2. **Firmware skeleton:** Wi-Fi, key generation, setup page, host key
+2. **Firmware skeleton:** Wi-Fi, key generation, settings page, host key
    pinning, SSH session, `/v1/version` probe, `/events`, agents list.
 3. **Cards:** approve/deny, plan, question.
 4. **Detail, keys and prompts:** canned prompts, then the on-screen keyboard.
@@ -230,7 +240,7 @@ from `main`. It adds:
 - **No host-side software.** The X4 talks to stock `moshi-hook` directly.
 - **Authentication is SSH.** The gateway stays on loopback, and the X4 tunnels
   to it with its own ed25519 key, restricted with `restrict`, `permitopen` and a forced `command`. The key is
-  generated on the device and the public half is shown on the setup page.
+  generated on the device and the public half is shown on the settings page.
   Host keys are trusted on first use and then pinned.
 - **Multiple machines:** each runs its own moshi-hook. The device connects to
   one at a time and switches between them.

@@ -4,10 +4,11 @@
 // moshi-hook's loopback gateway, and parse /events frames while the e-paper
 // frame buffer is also resident? Logs free heap at every step over serial.
 //
-// First boot generates an ed25519 key and opens the setup portal (Wi-Fi
-// "Rhino-X4-Setup"), which takes Wi-Fi and host settings and shows the
-// restricted authorized_keys line to add on the host. Hold Back while booting
-// to reopen it. The host key is trusted on first use and pinned in NVS.
+// First boot generates an ed25519 key and starts setup mode: an open access
+// point (no captive redirect) serving the settings page
+// at http://192.168.4.1. Afterwards the page is at http://rhino-x4.local. Hold
+// Back while booting to return to setup mode. The host key is trusted on
+// first use and pinned in NVS.
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -19,8 +20,13 @@
 
 #include "board.h"
 #include "buttons.h"
+#include "config_server.h"
 #include "settings.h"
-#include "setup_portal.h"
+
+// libssh needs far more than the Arduino loop task's default 8 KB of stack;
+// this matches LibSSH-ESP32's examples. The high-water mark is logged below so
+// it can be trimmed.
+SET_LOOP_TASK_STACK_SIZE(50 * 1024);
 
 using EpdDisplay = GxEPD2_BW<GxEPD2_426_GDEQ0426T82, GxEPD2_426_GDEQ0426T82::HEIGHT>;
 EpdDisplay display(GxEPD2_426_GDEQ0426T82(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
@@ -29,12 +35,13 @@ static const char* GATEWAY_HOST = "127.0.0.1";
 static const int GATEWAY_PORT = 24543;
 
 static void heap(const char* step) {
-  Serial.printf("[heap] %-28s free=%6u  min=%6u  largest=%6u\n", step, ESP.getFreeHeap(),
-                ESP.getMinFreeHeap(), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  Serial.printf("[heap] %-28s free=%6u  min=%6u  largest=%6u  stack_left=%5u\n", step, ESP.getFreeHeap(),
+                ESP.getMinFreeHeap(), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                uxTaskGetStackHighWaterMark(nullptr));
 }
 
 static void show(const String& text) {
-  display.setRotation(0);
+  display.setRotation(settings::rotation());
   display.setFullWindow();
   display.firstPage();
   do {
@@ -49,8 +56,11 @@ static void show(const String& text) {
 static void fail(const char* what) {
   Serial.printf("FAIL: %s\n", what);
   heap("at failure");
-  show(String("Spike failed: ") + what + "\n\n Hold Back while booting to open setup.");
-  while (true) delay(1000);
+  show(String("Spike failed:\n ") + what + "\n\n Settings:\n http://" + config_server::HOSTNAME + ".local");
+  while (true) {
+    config_server::handle();
+    delay(2);
+  }
 }
 
 static ssh_key loadOrCreateKey() {
@@ -79,11 +89,11 @@ static String authorizedKeysLine(ssh_key key) {
   return line;
 }
 
-static void onPortalOpen() {
-  Serial.printf("Setup portal open: join Wi-Fi \"%s\", then browse to http://192.168.4.1\n",
-                setup_portal::AP_NAME);
-  show(String("Setup\n\n Join Wi-Fi \"") + setup_portal::AP_NAME + "\"\n then open http://192.168.4.1");
+static void onSetupMode(const char* ssid, const char* url) {
+  show(String("Setup\n\n Join Wi-Fi:\n ") + ssid + "\n\n Then open:\n " + url);
 }
+
+static void onConnecting(const char* ssid) { show(String("Joining\n ") + ssid + "..."); }
 
 // Trust on first use: pin the SHA256 fingerprint, refuse if it ever changes.
 static void verifyHostKey(ssh_session s) {
@@ -266,10 +276,10 @@ void setup() {
   Serial.printf("\nauthorized_keys line for the host:\n%s\n\n", akLine.c_str());
   heap("key loaded");
 
-  if (!setup_portal::connect(akLine, forceSetup, onPortalOpen)) {
-    Serial.println("Setup not completed; restarting.");
-    ESP.restart();
-  }
+  config_server::Callbacks cb;
+  cb.onSetupMode = onSetupMode;
+  cb.onConnecting = onConnecting;
+  config_server::begin(akLine, forceSetup, cb);
   Serial.printf("WiFi %s\n", WiFi.localIP().toString().c_str());
   heap("wifi up");
 
@@ -314,4 +324,7 @@ void setup() {
   show("Spike done: SSH tunnel to " + host.name + " works.\n\n See serial log for heap numbers.");
 }
 
-void loop() { delay(1000); }
+void loop() {
+  config_server::handle();
+  delay(2);
+}
