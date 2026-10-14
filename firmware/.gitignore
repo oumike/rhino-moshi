@@ -6,3 +6,5 @@
 .vscode/launch.json
 .vscode/ipch
 compile_commands.json
+src/idf_component.yml
+src/idf_component.yml.orig
