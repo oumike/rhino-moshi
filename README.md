@@ -7,8 +7,9 @@
 Turn an [Xteink X4](https://www.xteink.com/products/xteink-x4) into a desk
 console for coding agents running under [Moshi](https://getmoshi.app) and
 [herdr](https://github.com/herdrdev/herdr) (or tmux). The X4 talks **directly to
-the `moshi-hook` daemon** already running on your other machines. Nothing else
-is installed on the host.
+the `moshi-hook` daemon** already running on your other machines, over SSH, the
+same way the Moshi app does. Nothing is installed on the host; you only
+authorize the X4's SSH key.
 
 **Jobs**, in priority order:
 
@@ -22,46 +23,76 @@ is installed on the host.
 
 ## Host setup
 
-`moshi-hook serve` runs a gateway (HTTP + WebSocket) that listens on
-`127.0.0.1:24543` by default. Only programs on the same machine can reach it.
-For the X4 to reach it, bind it to an address the X4 can see, in
-`~/.config/moshi/config.toml`:
+Nothing is installed on the host, and moshi-hook keeps its default settings.
+Its gateway stays on `127.0.0.1:24543`, unreachable from the network. Like the
+Moshi app, the X4 reaches it through **SSH**: it logs in with its own key and
+opens a tunnel (an SSH `direct-tcpip` channel, the same thing `ssh -W` does) to
+`127.0.0.1:24543` on the host.
 
-```toml
-[gateway]
-listen = "192.168.1.20:24543"   # this machine's LAN or Tailscale address
-```
+1. **Enable SSH** on the host if it isn't already (macOS: System Settings →
+   General → Sharing → Remote Login).
+2. **Authorize the X4's key.** On first boot the X4 generates an ed25519 key
+   pair. The private half never leaves the device. Open the X4's setup page
+   (see [Firmware](#firmware)), copy the `authorized_keys` line it shows, and
+   append it to `~/.ssh/authorized_keys` on each host:
 
-Then run `brew services restart moshi-hook`.
+   ```
+   restrict,port-forwarding,permitopen="127.0.0.1:24543",command="false" ssh-ed25519 AAAA… rhino-x4-3fa2
+   ```
 
-> **Warning:** the gateway has **no authentication**. That's by design, because
-> Moshi expects it to be reached only over SSH. Anyone who can reach that
-> address can approve tool calls and type into your agents' terminals. Bind it
-> to an interface on a network you trust, never `0.0.0.0` on shared Wi-Fi, and
-> firewall the port to the X4's IP if you can.
+   The options limit this key to exactly one thing: a tunnel to the moshi-hook
+   gateway. `restrict` turns off every OpenSSH feature (pty, agent/X11
+   forwarding, other forwards). `port-forwarding` plus `permitopen` re-enable
+   only the gateway tunnel, and `command="false"` makes any attempt to run a
+   shell or command exit immediately. Requires OpenSSH 7.2+. A stolen X4 can do what the X4 already
+   does, and nothing more. To revoke it, delete the line.
+3. **Add the host on the X4:** a name, address, SSH port and user, entered in
+   the setup page or with the on-screen keyboard.
+4. **Confirm the host key** on first connect. The X4 shows the host's SHA256
+   fingerprint. Compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
+   on the host, then press Trust. The key is pinned. If it later changes, the
+   X4 refuses to connect and shows both fingerprints. It never re-trusts
+   silently.
+
+## Security model
+
+| Threat | Mitigation |
+|---|---|
+| Someone on the LAN talks to moshi-hook | The gateway never leaves loopback. Only SSH is exposed, and SSH already guards the machine. |
+| Network eavesdropping or tampering | All traffic runs inside SSH (encrypted and integrity-checked). |
+| Spoofed host / man-in-the-middle | The host key is pinned on first use, and any change blocks the connection. |
+| Lost or stolen X4 | The key is restricted to `permitopen="127.0.0.1:24543"`. Remove its `authorized_keys` line on each host. |
+| Someone reads the key off the X4 | The private key lives in NVS. Enabling ESP32 flash encryption is optional hardening; without it, physical access is game over, and the restriction above bounds the damage. |
+| Setup page abuse | The setup portal runs only on request (a button combo or Settings), on the X4's own access point, and times out. It shows the public key and accepts host entries; the private key can't be read or exported. |
 
 ## Constraints that shape the design
 
 | Constraint | Consequence |
 |---|---|
 | The gateway speaks its full API: multi-KB workspace frames and agent-status frames with plan markdown. | The firmware parses with ArduinoJson **filters**, keeping only the fields it draws, and discards everything else while parsing. |
-| ESP32-C3: ~320 KB RAM, no PSRAM, single core. | **One WebSocket** to **one host** at a time. Frame-size limits are enforced, and oversized frames are dropped with an on-screen notice rather than crashing. |
+| ESP32-C3: ~320 KB RAM, no PSRAM, single core. SSH (libssh + mbedTLS) takes a large share. | **One SSH session** to **one host** at a time, carrying one WebSocket channel plus short-lived HTTP channels. Frame-size limits are enforced, and oversized frames are dropped with an on-screen notice rather than crashing. |
 | An `/events` agent watch follows **one agent session**. | The device re-points its single agent watch at whichever agent needs it most (see below). |
 | E-paper: ~1.7 s full refresh, partial refresh for small regions. | Redraws only when something a human cares about changes. Ephemeral "Thinking… (12s)" lines are throttled. |
 | Six usable buttons plus power, no touch. | List navigation plus contextual soft keys. Typing uses an on-screen keyboard. |
-| No discovery protocol in moshi-hook. | Hosts are configured on the device (name + address:port) through the setup portal or the on-screen keyboard. |
+| No discovery protocol in moshi-hook. | Hosts are configured on the device through the setup page or the on-screen keyboard. |
 
 ## How the firmware uses the gateway
 
 ```
- laptop                                   Xteink X4
-┌──────────────────────────────┐
-│ herdr / tmux ── agents       │        ┌───────────────────────┐
-│ moshi-hook serve             │◀═══════│ /events WebSocket     │  one host
-│   gateway 192.168.1.20:24543 │◀───────│ HTTP POSTs (answers)  │  at a time
-└──────────────────────────────┘        └───────────────────────┘
- desktop: same, configured on the device, connected only when selected
+ laptop                                          Xteink X4
+┌─────────────────────────────────────┐
+│ herdr / tmux ── agents              │       ┌──────────────────────────┐
+│ moshi-hook serve                    │       │ SSH client (libssh)      │
+│   gateway 127.0.0.1:24543 ◀── sshd ◀════════│  ├ channel: /events WS   │  one host
+│   (loopback only)        :22        │  SSH  │  └ channel: HTTP POSTs   │  at a time
+└─────────────────────────────────────┘       └──────────────────────────┘
+ desktop: same, configured on the X4, connected only when selected
 ```
+
+Every gateway call below travels over a `direct-tcpip` channel to
+`127.0.0.1:24543` inside the one SSH session. The `/events` WebSocket gets one
+long-lived channel; each HTTP POST opens a short-lived channel, which costs
+almost nothing on an established session.
 
 | Purpose | Gateway call |
 |---|---|
@@ -105,8 +136,19 @@ card screen shows "1 of N waiting".
 ## Firmware
 
 PlatformIO + Arduino, reusing `board.h`, `buttons.*`, GxEPD2 and ArduinoJson
-from `main`. It adds a WebSocket client (e.g. `links2004/WebSockets`).
-WiFiManager handles first-boot Wi-Fi setup and the first host entry.
+from `main`. It adds:
+
+- **[LibSSH-ESP32](https://github.com/ewpa/LibSSH-ESP32)** (libssh + mbedTLS,
+  supports the C3) for the SSH session, ed25519 keys and `direct-tcpip`
+  channels (`ssh_channel_open_forward`).
+- A small HTTP/1.1 and WebSocket client written against a byte-stream
+  interface, so it runs over an SSH channel instead of a `WiFiClient`.
+  (Alternative: a loopback listener on the X4 that relays to the channel, so
+  stock libraries work unchanged. The spike decides.)
+- **Setup page:** a WiFiManager-style captive portal on the X4's own access
+  point. It handles Wi-Fi credentials, shows the `authorized_keys` line, and
+  takes host entries (name, address, port, user). It opens on first boot or
+  from Settings, and closes after 10 minutes.
 
 ### Screens
 
@@ -139,11 +181,14 @@ WiFiManager handles first-boot Wi-Fi setup and the first host entry.
 - **Keyboard:** a 4-row grid. Up/Down change rows, Left/Right move along a row,
   Confirm types, Back deletes, and holding Back cancels. Meant for short
   prompts.
-- **Hosts:** configured hosts with reachability. Confirm switches hosts,
-  closing the current connection first.
+- **Hosts:** configured hosts with their state (connected, unreachable, key
+  not authorized, host key changed). Confirm switches hosts, closing the
+  current SSH session first. A new host shows its fingerprint for Trust or
+  Cancel.
 - **Usage:** per-agent rate-limit windows with reset times.
-- **Settings:** rotation, button calibration, hosts, canned prompts, Wi-Fi
-  reset.
+- **Settings:** rotation, button calibration, hosts, canned prompts, open
+  the setup page, show the X4's key fingerprint, regenerate the key (every
+  host must re-authorize), and reset Wi-Fi.
 
 ### Refresh policy
 
@@ -156,29 +201,37 @@ WiFiManager handles first-boot Wi-Fi setup and the first host entry.
 
 ## Risks to verify early
 
-- **Frame sizes:** measure real `workspaces` and `agentStatus` frames
-  (`websocat ws://<host>:24543/events`) against C3 heap. Plan text in
-  `pendingPrompt` is the likely worst case, and `/v1/plans/answer` needs it
-  echoed back.
+- **SSH on the C3:** heap left after Wi-Fi, a libssh session and one
+  open channel, plus the time an ed25519/curve25519 handshake takes. LibSSH-ESP32
+  supports the C3, but this app also needs GxEPD2's buffers and JSON parsing.
+- **Frame sizes:** measure real `workspaces` and `agentStatus` frames against
+  the heap left over. Plan text in `pendingPrompt` is the likely worst case,
+  and `/v1/plans/answer` needs it echoed back.
 - **Re-watch semantics:** confirm that sending a new `watch` with a different
   `agent` replaces the previous agent watch on the same socket.
-- **Non-loopback binding:** confirm the gateway accepts requests when bound
-  to a LAN address (no Host/Origin checks rejecting the X4).
+- **Session-less client:** the X4 is a loopback client with no terminal, so
+  it gets the gateway's loopback behavior (herdr by default, `mux=` to pin).
+  Confirm that the answer endpoints resolve panes from hook state, as
+  documented for loopback callers.
 
 ## Build order
 
-1. **Spike:** bind a gateway to the LAN and capture frames; check the three
-   risks above.
-2. **Firmware skeleton:** Wi-Fi, host config, `/v1/version` probe, `/events`
-   connect, agents list.
+1. **Spike:** use `ssh -W 127.0.0.1:24543 host` plus `websocat` to capture
+   frames; on the X4, get libssh to open a channel and fetch `/v1/version`
+   while measuring heap.
+2. **Firmware skeleton:** Wi-Fi, key generation, setup page, host key
+   pinning, SSH session, `/v1/version` probe, `/events`, agents list.
 3. **Cards:** approve/deny, plan, question.
 4. **Detail, keys and prompts:** canned prompts, then the on-screen keyboard.
 5. **Usage**, host switching, settings, refresh tuning.
 
 ## Decisions
 
-- **No host-side software.** The X4 talks to stock `moshi-hook` directly. The
-  user makes the gateway reachable and accepts that it has no authentication.
+- **No host-side software.** The X4 talks to stock `moshi-hook` directly.
+- **Authentication is SSH.** The gateway stays on loopback, and the X4 tunnels
+  to it with its own ed25519 key, restricted with `restrict`, `permitopen` and a forced `command`. The key is
+  generated on the device and the public half is shown on the setup page.
+  Host keys are trusted on first use and then pinned.
 - **Multiple machines:** each runs its own moshi-hook. The device connects to
   one at a time and switches between them.
 - **Finished agents:** re-sorted and marked as unseen, with no pop-up.
