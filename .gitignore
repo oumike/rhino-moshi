@@ -1,0 +1,8 @@
+.pio/
+__pycache__/
+*.pyc
+
+# Stock firmware backups must not end up in version control -- they are large,
+# binary, and the only copy of something you cannot re-download.
+*.bin
+*.sha256

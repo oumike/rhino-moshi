@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+#
+# Back up and restore an Xteink X4's flash, whatever is running on it.
+#
+# This talks to the ESP32-C3 boot ROM over USB, not to any particular firmware,
+# so it works identically on stock, on Rhino Companion, and on a device whose
+# application image is corrupt enough not to boot. The boot ROM lives in mask
+# ROM and cannot be overwritten, so a device can always be talked back into
+# download mode no matter what was written to flash.
+#
+#   xteink-flash info
+#   xteink-flash backup [-o FILE]
+#   xteink-flash restore FILE
+#   xteink-flash verify FILE
+#
+# A backup is the only way back to stock: Xteink does not publish images.
+
+set -euo pipefail
+
+PROG="$(basename "$0")"
+PORT=""
+OUT=""
+SIZE_OVERRIDE=""
+ASSUME_YES=0
+ERASE_FIRST=0
+BAUD=921600
+
+die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
+note() { printf '  %s\n' "$*" >&2; }
+step() { printf '\n== %s\n' "$*" >&2; }
+
+usage() {
+  cat <<'EOF'
+Back up and restore an Xteink X4's flash, whatever is running on it.
+
+Talks to the ESP32-C3 boot ROM over USB rather than to any particular
+firmware, so it works identically on stock, on Rhino Companion, and on a
+device whose application image is too corrupt to boot.
+
+A backup is the only way back to stock: Xteink does not publish images.
+
+Commands:
+  info               Show port, chip and flash size
+  backup [-o FILE]   Read the whole flash to FILE, with a .sha256 sidecar
+  verify FILE        Check an image against the device; writes nothing
+  restore FILE       Write FILE to flash (destructive)
+
+Options:
+  -p, --port PORT    Serial port (default: autodetect)
+  -o, --out FILE     Backup destination (default: xteink-<chip>-<date>.bin)
+  -b, --baud RATE    Transfer speed (default: 921600)
+  -s, --size BYTES   Override detected flash size (rarely needed)
+  -e, --erase        restore: erase the whole chip before writing
+  -y, --yes          Do not prompt before destructive actions
+  -h, --help         This text
+EOF
+}
+
+# --- tools -----------------------------------------------------------------
+
+find_esptool() {
+  local candidate
+  for candidate in esptool.py esptool; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      printf '%s' "$candidate"; return 0
+    fi
+  done
+  # PlatformIO bundles one; it is the common case on a machine set up to build
+  # this firmware, and saves asking the user to install a second copy.
+  for candidate in "$HOME"/.platformio/penv/bin/esptool.py \
+                   "$HOME"/.platformio/penv/bin/esptool; do
+    [ -x "$candidate" ] && { printf '%s' "$candidate"; return 0; }
+  done
+  die "esptool not found. Install it (pip install esptool) or build the firmware once."
+}
+
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    printf ''
+  fi
+}
+
+file_size() {
+  # stat's spelling differs between BSD and GNU.
+  stat -f%z "$1" 2>/dev/null || stat -c%s "$1"
+}
+
+# --- device ----------------------------------------------------------------
+
+detect_port() {
+  [ -n "$PORT" ] && { printf '%s' "$PORT"; return 0; }
+
+  local found=()
+  # The X4's ESP32-C3 uses native USB CDC, so it enumerates as usbmodem (macOS)
+  # or ttyACM (Linux). A usbserial/ttyUSB device is a UART adapter -- something
+  # else entirely, and writing flash to it would be a bad day.
+  for pattern in /dev/cu.usbmodem* /dev/ttyACM*; do
+    for dev in $pattern; do
+      [ -e "$dev" ] && found+=("$dev")
+    done
+  done
+
+  case ${#found[@]} in
+    0) die "no device found. Check the cable (charge-only cables are the usual culprit), that the device is powered on, and try another port." ;;
+    1) printf '%s' "${found[0]}" ;;
+    *) die "multiple candidate ports: ${found[*]} -- pick one with --port" ;;
+  esac
+}
+
+# Populates CHIP and FLASH_BYTES. Returns non-zero rather than exiting, so a
+# caller that can proceed without a device (verify) is free to; the ones that
+# cannot (info, backup, restore) turn the failure into an error themselves.
+# PROBE_ERROR carries the reason.
+probe() {
+  local port="$1" output
+  PROBE_ERROR=""
+  step "Probing $port"
+  if ! output="$("$ESPTOOL" --port "$port" flash_id 2>&1)"; then
+    # The busy case is worth naming: it usually means another flash or monitor
+    # is holding the port, not that anything is wrong with the device.
+    if printf '%s' "$output" | grep -qi "busy\|exclusively lock"; then
+      PROBE_ERROR="port $port is busy -- another flash, monitor or backup is using it"
+    else
+      PROBE_ERROR="could not talk to the device on $port"
+      printf '%s\n' "$output" >&2
+    fi
+    return 1
+  fi
+
+  CHIP="$(printf '%s' "$output" | sed -n 's/^Chip is \([^ ]*\).*/\1/p' | head -1)"
+  # flash_id prints "ESP32-C3"; esptool's --chip wants "esp32c3". Some versions
+  # accept the printed spelling, so normalise rather than rely on it.
+  CHIP_ARG="$(printf '%s' "$CHIP" | tr '[:upper:]' '[:lower:]' | tr -d '-')"
+  [ -n "$CHIP_ARG" ] || CHIP_ARG="esp32c3"
+  [ -n "$CHIP" ] && note "chip: $CHIP"
+
+  if [ -n "$SIZE_OVERRIDE" ]; then
+    FLASH_BYTES="$SIZE_OVERRIDE"
+    note "flash: $FLASH_BYTES bytes (overridden)"
+    return 0
+  fi
+
+  local detected
+  detected="$(printf '%s' "$output" | sed -n 's/^Detected flash size: \(.*\)$/\1/p' | head -1)"
+  if [ -z "$detected" ]; then
+    PROBE_ERROR="could not detect flash size; pass --size"
+    return 1
+  fi
+
+  case "$detected" in
+    *MB) FLASH_BYTES=$(( ${detected%MB} * 1024 * 1024 )) ;;
+    *KB) FLASH_BYTES=$(( ${detected%KB} * 1024 )) ;;
+    *)   PROBE_ERROR="unrecognized flash size '$detected'; pass --size"; return 1 ;;
+  esac
+  note "flash: $detected ($FLASH_BYTES bytes)"
+}
+
+# probe, or fail the whole command. For the paths that need a real device.
+probe_or_die() {
+  probe "$1" || die "${PROBE_ERROR:-probe failed}"
+}
+
+confirm() {
+  [ "$ASSUME_YES" = 1 ] && return 0
+  local reply
+  printf '%s [y/N] ' "$1" >&2
+  # Read from the terminal, so this still asks when stdin is a pipe.
+  read -r reply < /dev/tty || reply=""
+  case "$reply" in [yY]*) return 0 ;; *) die "aborted" ;; esac
+}
+
+# --- commands --------------------------------------------------------------
+
+cmd_info() {
+  local port; port="$(detect_port)"
+  probe_or_die "$port"
+  printf '\nport   %s\nchip   %s\nflash  %s bytes\n' \
+    "$port" "${CHIP:-unknown}" "$FLASH_BYTES"
+}
+
+cmd_backup() {
+  local port; port="$(detect_port)"
+  probe_or_die "$port"
+
+  local out="$OUT"
+  if [ -z "$out" ]; then
+    out="xteink-${CHIP:-esp32c3}-$(date +%Y%m%d-%H%M%S).bin"
+  fi
+  [ -e "$out" ] && confirm "$out exists. Overwrite?"
+
+  step "Reading $FLASH_BYTES bytes -> $out"
+  note "this takes a few minutes at 16 MB; do not unplug"
+  "$ESPTOOL" --chip "${CHIP_ARG:-esp32c3}" --port "$port" --baud "$BAUD" \
+    read_flash 0x0 "$FLASH_BYTES" "$out"
+
+  # A backup short by one byte is not a backup. Check rather than assume.
+  local got; got="$(file_size "$out")"
+  if [ "$got" != "$FLASH_BYTES" ]; then
+    die "SHORT READ: got $got bytes, expected $FLASH_BYTES. Do not trust '$out'."
+  fi
+
+  local sum; sum="$(sha256_of "$out")"
+  if [ -n "$sum" ]; then
+    printf '%s  %s\n' "$sum" "$(basename "$out")" > "$out.sha256"
+    note "sha256: $sum"
+  fi
+
+  step "Backup complete: $out ($got bytes)"
+  note "keep this somewhere other than this repo -- it is the only way back to stock"
+}
+
+# Integrity checks that need only the file. Kept separate from the device so a
+# backup can be checked wherever it is stored, which is where you most want to
+# know -- an unreadable backup discovered at restore time is discovered too
+# late.
+check_image_file() {
+  local image="$1"
+  [ -f "$image" ] || die "no such file: $image"
+  [ -s "$image" ] || die "'$image' is empty"
+
+  local size; size="$(file_size "$image")"
+  printf '\nimage  %s (%s bytes)\n' "$image" "$size"
+
+  if [ -f "$image.sha256" ]; then
+    local want got
+    want="$(awk '{print $1}' < "$image.sha256")"
+    got="$(sha256_of "$image")"
+    if [ -z "$got" ]; then
+      printf 'sha256 no checksum tool available -- integrity unverified\n'
+    elif [ "$want" != "$got" ]; then
+      die "CHECKSUM MISMATCH -- '$image' is corrupt. Do not restore it."
+    else
+      printf 'sha256 ok\n'
+    fi
+  else
+    printf 'sha256 no sidecar file (%s.sha256) -- integrity unverified\n' "$image"
+  fi
+
+  # An ESP32 image begins with the 0xE9 magic byte. Catching a wrong file here
+  # beats writing it and finding out from a device that will not boot.
+  local magic
+  magic="$(od -An -tx1 -N1 "$image" | tr -d ' \n')"
+  if [ "$magic" = "e9" ]; then
+    printf 'magic  0xE9 (ESP32 image)\n'
+  else
+    printf 'magic  0x%s -- NOT an ESP32 image header\n' "${magic:-??}"
+    confirm "This does not look like an ESP32 image. Continue anyway?"
+  fi
+}
+
+# Compare against the attached device. FLASH_BYTES must already be set.
+check_image_against_device() {
+  local size="$1"
+  if [ "$size" -gt "$FLASH_BYTES" ]; then
+    die "image is larger than the device's flash ($size > $FLASH_BYTES)"
+  elif [ "$size" -lt "$FLASH_BYTES" ]; then
+    printf 'size   PARTIAL: %s of %s bytes; a restore leaves the remainder untouched\n' \
+      "$size" "$FLASH_BYTES"
+  else
+    printf 'size   full-chip image\n'
+  fi
+}
+
+cmd_verify() {
+  local image="$1"
+  check_image_file "$image"
+  local size; size="$(file_size "$image")"
+
+  # The device is a bonus here, not a requirement: without it the file checks
+  # above still stand on their own.
+  local port=""
+  port="$(detect_port 2>/dev/null)" || {
+    printf 'device no device attached -- file checks only\n'; return 0; }
+  probe "$port" >/dev/null 2>&1 || {
+    printf 'device %s -- file checks only\n' "${PROBE_ERROR:-not probed}"; return 0; }
+  printf 'device %s, %s bytes of flash\n' "${CHIP:-unknown}" "$FLASH_BYTES"
+  check_image_against_device "$size"
+}
+
+cmd_restore() {
+  local image="$1"
+  check_image_file "$image"
+
+  local port; port="$(detect_port)"
+  probe_or_die "$port"
+  local size; size="$(file_size "$image")"
+  check_image_against_device "$size"
+
+  printf '\n'
+  confirm "Overwrite the flash on $port with $image? This cannot be undone."
+
+  if [ "$ERASE_FIRST" = 1 ]; then
+    step "Erasing chip"
+    "$ESPTOOL" --chip "${CHIP_ARG:-esp32c3}" --port "$port" erase_flash
+  fi
+
+  step "Writing $size bytes from $image"
+  "$ESPTOOL" --chip "${CHIP_ARG:-esp32c3}" --port "$port" --baud "$BAUD" \
+    write_flash 0x0 "$image"
+
+  step "Restore complete"
+  note "esptool verified the written hash; power-cycle the device to boot it"
+}
+
+# --- argument parsing ------------------------------------------------------
+
+COMMAND=""
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p|--port)  PORT="${2:-}"; shift 2 ;;
+    -o|--out)   OUT="${2:-}"; shift 2 ;;
+    -b|--baud)  BAUD="${2:-}"; shift 2 ;;
+    -s|--size)  SIZE_OVERRIDE="${2:-}"; shift 2 ;;
+    -e|--erase) ERASE_FIRST=1; shift ;;
+    -y|--yes)   ASSUME_YES=1; shift ;;
+    -h|--help)  usage; exit 0 ;;
+    -*)         die "unknown option: $1" ;;
+    *)
+      if [ -z "$COMMAND" ]; then COMMAND="$1"; else ARGS+=("$1"); fi
+      shift ;;
+  esac
+done
+
+[ -n "$COMMAND" ] || { usage; exit 2; }
+ESPTOOL="$(find_esptool)"
+
+case "$COMMAND" in
+  info)    cmd_info ;;
+  backup)  cmd_backup ;;
+  restore) [ ${#ARGS[@]} -ge 1 ] || die "restore needs a file"; cmd_restore "${ARGS[0]}" ;;
+  verify)  [ ${#ARGS[@]} -ge 1 ] || die "verify needs a file";  cmd_verify "${ARGS[0]}" ;;
+  *)       die "unknown command '$COMMAND' (try --help)" ;;
+esac
