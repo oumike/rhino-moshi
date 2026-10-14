@@ -20,6 +20,7 @@ struct Agent {
   double changedAt = 0;  // Unix seconds; 0 if unknown
   bool approx = false;   // changedAt is "at or before"
   bool unseen = false;   // finished since it was last opened on the X4
+  bool dismissed = false;  // its card was closed with Back; cleared when it blocks anew
 };
 
 /**
@@ -45,6 +46,14 @@ class Agents {
 
   // Opening an agent on the X4 clears its unseen mark.
   bool markSeen(const String& id);
+
+  void setDismissed(const String& id, bool dismissed);
+  // Blocked agents whose cards weren't dismissed, waiting longest first.
+  std::vector<int> waitingOrder() const;
+  // 1-based position of `id` among the blocked agents in list order, or 0.
+  int blockedPosition(const String& id) const;
+  // The blocked agent after `id` in list order, wrapping around; -1 if none.
+  int nextBlocked(const String& id) const;
 
  private:
   std::vector<Agent> list_;

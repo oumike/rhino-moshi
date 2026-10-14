@@ -35,9 +35,15 @@ const int TEXT_X = 54;  // row text start
 const int FULL_EVERY = 15;
 // Gateway pushes can arrive several times a second; batch them.
 const unsigned long MIN_REDRAW_MS = 1000;
+const unsigned long NOTICE_MS = 4000;
+// With several agents blocked and nothing answerable on the watched one,
+// move the watch on after this long.
+const unsigned long ROTATE_MS = 10000;
+const int OPTION_H = 44;       // option row without a description
+const int OPTION_DESC_H = 66;  // with one
 
-enum class View { None, Message, Status, List, Detail };
-enum class Screen { List, Detail };
+enum class View { None, Message, Status, List, Detail, Card };
+enum class Screen { List, Detail, Card };
 
 uint8_t rotation = DEFAULT_ROTATION;
 int partials = 0;
@@ -51,18 +57,37 @@ bool pending = false;  // gateway changes not drawn yet
 unsigned long lastDrawAt = 0;
 long lastMinute = -1;
 
+String notice;  // a short result line under the header, e.g. "Approved"
+unsigned long noticeUntil = 0;
+
+// Card state. The selection belongs to the request `cardKey`; a new request
+// starts over.
+Screen cardReturn = Screen::List;
+String cardKey;
+size_t qIndex = 0;
+int choices[Card::MAX_QUESTIONS];
+int scroll = 0;           // first text line shown (message or plan)
+bool scrollMore = false;  // the last textArea() had more lines below
+int pageLines = 1;        // lines the last textArea() showed
+enum class Send { None, Approve, Deny, Choice } sendAfterDraw = Send::None;
+
+// Which blocked agent the list-mode watch is on; see ROTATE_MS.
+size_t rotate = 0;
+String lastWatched;
+unsigned long watchedSince = 0;
+
 int W() { return display.width(); }
 int H() { return display.height(); }
 
 // The built-in fonts are 7-bit ASCII; map the punctuation agents like to use
 // and drop the rest (emoji, CJK) rather than print garbage.
-String ascii(const String& s) {
+String ascii(const String& s, bool keepNewlines = false) {
   String out;
   out.reserve(s.length());
   for (size_t i = 0; i < s.length();) {
     uint8_t c = s[i];
     if (c < 0x80) {
-      out += c < 0x20 ? ' ' : (char)c;
+      out += c == '\n' && keepNewlines ? '\n' : c < 0x20 ? ' ' : (char)c;
       i++;
       continue;
     }
@@ -81,6 +106,8 @@ String ascii(const String& s) {
       case 0x201C:
       case 0x201D: out += '"'; break;
       case 0x00A0: out += ' '; break;
+      case 0x2192: out += "->"; break;
+      case 0x2190: out += "<-"; break;
     }
     i += n;
   }
@@ -96,6 +123,7 @@ int textWidth(const String& s) {
 
 // Truncate with "..." to fit `maxW` in the current font.
 String fit(String s, int maxW) {
+  if (s.length() > 200) s.remove(200);  // nothing wider fits a line anyway
   if (textWidth(s) <= maxW) return s;
   while (s.length() && textWidth(s + "...") > maxW) s.remove(s.length() - 1);
   return s + "...";
@@ -135,6 +163,29 @@ std::vector<String> wrap(const String& text, int maxW, int maxLines) {
   }
   if (line.length()) lines.push_back(line);
   return lines;
+}
+
+// Wraps text that may hold newlines; blank lines collapse to one. Stops after
+// `maxLines`.
+std::vector<String> layout(const String& s, int maxW, size_t maxLines) {
+  std::vector<String> out;
+  int start = 0, n = s.length();
+  while (start <= n && out.size() < maxLines) {
+    int nl = s.indexOf('\n', start);
+    if (nl < 0) nl = n;
+    String para = s.substring(start, nl);
+    para.trim();
+    if (para.isEmpty()) {
+      if (out.size() && out.back().length()) out.push_back("");
+    } else {
+      for (const String& line : wrap(para, maxW, 10000)) {
+        if (out.size() >= maxLines) break;
+        out.push_back(line);
+      }
+    }
+    start = nl + 1;
+  }
+  return out;
 }
 
 void text(int x, int baseline, const String& s, const GFXfont* font, uint16_t color = GxEPD_BLACK) {
@@ -227,6 +278,21 @@ void header(Gateway& gw, Agents& agents) {
   display.fillRect(0, HEADER_H - 3, W(), 3, GxEPD_BLACK);
 }
 
+bool noticeShown() { return notice.length() && (long)(noticeUntil - millis()) > 0; }
+
+void showNotice(const String& s) {
+  notice = s;
+  noticeUntil = millis() + NOTICE_MS;
+}
+
+// Drawn last, over the top of the content.
+void drawNotice() {
+  if (!noticeShown()) return;
+  display.fillRect(0, HEADER_H, W(), 44, GxEPD_BLACK);
+  display.setFont(F_BOLD);
+  text(MARGIN, HEADER_H + 30, fit(ascii(notice), W() - 2 * MARGIN), F_BOLD, GxEPD_WHITE);
+}
+
 // Labels for the row of keys under the screen, each drawn above its key.
 void footer(const char* back, const char* confirm, const char* left, const char* right) {
   const char* labels[BTN_COUNT] = {};
@@ -308,6 +374,175 @@ String stateLine(const Agent& a) {
   }
 }
 
+// "workspace / tab", "1 of 3" and "claude - waiting 5m" over a card.
+// Returns the top of the space below.
+int cardHead(Gateway& gw, Agents& agents, const Agent& a) {
+  header(gw, agents);
+  int y = HEADER_H + 34;
+  int pos = agents.blockedPosition(a.id);
+  String right = pos ? String(pos) + " of " + String(agents.blockedCount()) : String();
+  display.setFont(F_TEXT);
+  int rw = right.length() ? textWidth(right) : 0;
+  if (rw) text(W() - MARGIN - rw, y, right, F_TEXT);
+  String name = ascii(a.workspace);
+  if (a.tab.length() && a.tab != "1") name += " / " + ascii(a.tab);
+  display.setFont(F_BOLD);
+  text(MARGIN, y, fit(name, W() - 3 * MARGIN - rw), F_BOLD);
+  y += 26;
+  String sub = ascii(a.kind);
+  String ago = age(a.changedAt, a.approx);
+  if (a.state == AgentState::Blocked && ago.length()) sub += " - waiting " + ago;
+  text(MARGIN, y, sub, F_SMALL);
+  y += 14;
+  display.fillRect(MARGIN, y, W() - 2 * MARGIN, 2, GxEPD_BLACK);
+  return y + 12;
+}
+
+// Text that may not fit: lines from `first` on, between top and bottom.
+// Records whether more follows (scrollMore) and how many lines fit.
+int textArea(int top, int bottom, const String& s, const GFXfont* font, int lineH, int first, bool hint = true) {
+  display.setFont(font);
+  int visible = max(1, (bottom - top) / lineH);
+  std::vector<String> lines = layout(ascii(s, true), W() - 2 * MARGIN, first + visible + 1);
+  if (first > 0 && first >= (int)lines.size()) {  // the text shrank under us
+    scroll = 0;
+    return textArea(top, bottom, s, font, lineH, 0, hint);
+  }
+  int y = top + lineH * 3 / 4;
+  for (int i = first; i < (int)lines.size() && i < first + visible; i++, y += lineH) text(MARGIN, y, lines[i], font);
+  scrollMore = (int)lines.size() > first + visible;
+  pageLines = visible;
+  if (scrollMore && hint) {
+    display.setFont(F_SMALL);
+    text(W() - MARGIN - textWidth("more..."), bottom + 14, "more...", F_SMALL);
+  }
+  return y - lineH * 3 / 4;
+}
+
+int optionHeight(const Card& c, size_t q) {
+  for (size_t i = 0; i < c.optionCount(q); i++)
+    if (*c.optionDescription(q, i)) return OPTION_DESC_H;
+  return OPTION_H;
+}
+
+// Numbered option rows from `top`, scrolled to keep `sel` (or -1) in view.
+void optionRows(const Card& c, size_t q, int sel, int top, int bottom) {
+  int n = c.optionCount(q), rowH = optionHeight(c, q);
+  int rows = max(1, (bottom - top) / rowH);
+  int first = sel >= rows ? sel - rows + 1 : 0;
+  for (int r = 0; r < rows && first + r < n; r++) {
+    int i = first + r, y = top + r * rowH;
+    bool on = i == sel;
+    uint16_t fg = on ? GxEPD_WHITE : GxEPD_BLACK;
+    if (on) display.fillRect(0, y, W(), rowH - 4, GxEPD_BLACK);
+    else display.drawRect(MARGIN / 2, y, W() - MARGIN, rowH - 4, GxEPD_BLACK);
+    display.setFont(F_BOLD);
+    text(MARGIN, y + 29, fit(String(i + 1) + ". " + ascii(c.optionLabel(q, i)), W() - 2 * MARGIN), F_BOLD, fg);
+    const char* d = c.optionDescription(q, i);
+    if (*d) {
+      display.setFont(F_SMALL);
+      text(MARGIN + 26, y + 54, fit(ascii(d), W() - 2 * MARGIN - 26), F_SMALL, fg);
+    }
+  }
+  if (first + rows < n) {
+    display.setFont(F_SMALL);
+    text(W() - MARGIN - textWidth("more..."), top + rows * rowH + 12, "more...", F_SMALL);
+  }
+}
+
+// Why the X4 can't answer, above the footer.
+void reasonLine(int bottom, const String& why) {
+  display.setFont(F_BOLD);
+  int y = bottom - 36;
+  for (const String& line : wrap(ascii(why), W() - 2 * MARGIN, 2)) {
+    text(MARGIN, y, line, F_BOLD);
+    y += 28;
+  }
+}
+
+const char* nextLabel(Agents& agents) {
+  int n = agents.nextBlocked(selectedId);
+  return n >= 0 && agents[n].id != selectedId ? "Next" : "";
+}
+
+void drawCard(Gateway& gw, Agents& agents) {
+  int ai = agents.indexOf(selectedId);
+  if (ai < 0) return;
+  const Agent& a = agents[ai];
+  int y = cardHead(gw, agents, a);
+  int bottom = H() - FOOTER_H - 22;
+  const Card& c = gw.card();
+  const char* next = nextLabel(agents);
+
+  if (!gw.cardPending()) {
+    String msg = !c.received()                   ? "Loading..."
+                 : a.state == AgentState::Blocked ? "It's waiting for you, but not on anything the X4 can answer. "
+                                                    "Check the terminal."
+                                                  : "Nothing waiting.";
+    textArea(y + 20, bottom, msg, F_TEXT, 30, 0);
+    footer("Back", "", "", next);
+    return;
+  }
+
+  String why;
+  bool can = c.answerable(&why);
+  int textBottom = can ? bottom : bottom - 70;
+  switch (c.kind()) {
+    case Card::Kind::Approval: {
+      String tool = *c.toolName() ? ascii(c.toolName()) : String("Permission");
+      display.setFont(F_TITLE);
+      text(MARGIN, y + 34, fit(tool, W() - 2 * MARGIN), F_TITLE);
+      y += 50;
+      if (*c.approvalTitle()) y = textArea(y, y + 2 * 30, c.approvalTitle(), F_TEXT, 30, 0, false) + 8;
+      display.drawFastHLine(MARGIN, y, W() - 2 * MARGIN, GxEPD_BLACK);
+      textArea(y + 8, textBottom, c.approvalMessage(), F_TEXT, 28, scroll);
+      if (!can) reasonLine(bottom, why);
+      footer("Back", can ? "Approve" : "", can ? "Deny" : "", next);
+      break;
+    }
+
+    case Card::Kind::Plan:
+    case Card::Kind::Menu: {
+      String title = *c.menuTitle() ? c.menuTitle() : "Plan ready";
+      y = textArea(y, y + 3 * 28, title, F_BOLD, 28, 0, false) + 8;
+      int n = c.optionCount(0);
+      int optsH = min(n, 5) * OPTION_H;
+      int optsTop = textBottom - optsH;
+      bool more = false;
+      if (*c.plan()) {
+        textArea(y, optsTop - 12, c.plan(), F_SMALL, 22, scroll);
+        more = scrollMore || scroll > 0;
+      }
+      optionRows(c, 0, can ? choices[0] : -1, optsTop, textBottom);
+      if (!can) reasonLine(bottom, why);
+      footer("Back", can ? "Send" : "", more ? "More" : "", next);
+      break;
+    }
+
+    case Card::Kind::Question: {
+      size_t nq = c.questionCount();
+      size_t q = min(qIndex, nq - 1);
+      String head = ascii(c.questionHeader(q));
+      if (nq > 1) head += (head.length() ? "  -  " : "") + String("question ") + (q + 1) + " of " + nq;
+      if (head.length()) {
+        text(MARGIN, y + 16, head, F_SMALL);
+        y += 24;
+      }
+      y = textArea(y, y + 4 * 30, c.questionText(q), F_BOLD, 30, 0, false) + 12;
+      optionRows(c, q, can ? choices[q] : -1, y, textBottom);
+      if (!can) reasonLine(bottom, why);
+      footer("Back", can ? (q + 1 < nq ? "Choose" : "Send") : "", can && q > 0 ? "Prev" : "", next);
+      break;
+    }
+
+    default:  // too big to hold
+      textArea(y + 20, textBottom, "This request is too big for the X4.", F_TEXT, 30, 0);
+      reasonLine(bottom, why);
+      footer("Back", "", "", next);
+      break;
+  }
+}
+
 void drawDetail(Gateway& gw, Agents& agents) {
   header(gw, agents);
   int i = agents.indexOf(selectedId);
@@ -328,7 +563,7 @@ void drawDetail(Gateway& gw, Agents& agents) {
     text(MARGIN, y, "Folder", F_SMALL);
     paragraph(y + 24, a.cwd, F_SMALL, 3, 22);
   }
-  footer("Back", "", "", "");
+  footer("Back", gw.cardPending() && gw.watchedId() == a.id ? "Answer" : "", "", "");
 }
 
 struct StatusText {
@@ -425,6 +660,139 @@ void moveCursor(Agents& agents, int delta) {
   selectedId = agents[cursor].id;
 }
 
+void openCard(Screen from) {
+  screen = Screen::Card;
+  cardReturn = from;
+  cardKey = "";
+}
+
+void closeCard() {
+  screen = cardReturn;
+  cardKey = "";
+}
+
+bool cardInput(Gateway& gw, Agents& agents, Buttons& b) {
+  if (b.wasPressed(BTN_BACK)) {
+    agents.setDismissed(selectedId, true);  // until it blocks on something new
+    closeCard();
+    return true;
+  }
+  if (b.wasPressed(BTN_RIGHT)) {
+    int n = agents.nextBlocked(selectedId);
+    if (n < 0 || agents[n].id == selectedId) return false;
+    selectedId = agents[n].id;
+    cursor = n;
+    agents.setDismissed(selectedId, false);
+    cardKey = "";
+    return true;
+  }
+  if (!gw.cardPending()) return false;
+  const Card& c = gw.card();
+  bool can = c.answerable();
+  switch (c.kind()) {
+    case Card::Kind::Approval:
+      if (!can) break;
+      if (b.wasPressed(BTN_CONFIRM)) sendAfterDraw = Send::Approve;
+      else if (b.wasPressed(BTN_LEFT)) sendAfterDraw = Send::Deny;
+      else break;
+      showNotice(sendAfterDraw == Send::Approve ? "Approving..." : "Denying...");
+      return true;
+
+    case Card::Kind::Plan:
+    case Card::Kind::Menu: {
+      if (b.wasPressed(BTN_LEFT)) {
+        scroll = scrollMore ? scroll + pageLines : 0;  // page through, then back to the top
+        return true;
+      }
+      if (!can) return false;
+      int n = c.optionCount(0);
+      if (b.wasPressed(BTN_DOWN)) choices[0] = min(choices[0] + 1, n - 1);
+      else if (b.wasPressed(BTN_UP)) choices[0] = max(choices[0] - 1, 0);
+      else if (b.wasPressed(BTN_CONFIRM)) {
+        sendAfterDraw = Send::Choice;
+        showNotice("Sending: " + String(c.optionLabel(0, choices[0])));
+      } else return false;
+      return true;
+    }
+
+    case Card::Kind::Question: {
+      if (!can) return false;
+      size_t nq = c.questionCount();
+      qIndex = min(qIndex, nq - 1);
+      int n = c.optionCount(qIndex);
+      int& sel = choices[qIndex];
+      if (b.wasPressed(BTN_DOWN)) sel = min(sel + 1, n - 1);
+      else if (b.wasPressed(BTN_UP)) sel = max(sel - 1, 0);
+      else if (b.wasPressed(BTN_LEFT) && qIndex > 0) qIndex--;
+      else if (b.wasPressed(BTN_CONFIRM)) {
+        if (qIndex + 1 < nq) {
+          qIndex++;
+        } else {
+          sendAfterDraw = Send::Choice;
+          showNotice(nq > 1 ? String("Sending answers...") : "Sending: " + String(c.optionLabel(qIndex, sel)));
+        }
+      } else return false;
+      return true;
+    }
+
+    default: break;
+  }
+  // Read-only text and approvals: Up/Down scroll.
+  if (b.wasPressed(BTN_DOWN) && scrollMore) scroll += 3;
+  else if (b.wasPressed(BTN_UP) && scroll > 0) scroll = max(0, scroll - 3);
+  else return false;
+  return true;
+}
+
+// Sends the answer chosen on the card, after the "Sending" notice is drawn.
+void sendAnswer(Gateway& gw, Send what) {
+  String err;
+  switch (gw.answer(what == Send::Approve, choices, err)) {
+    case Gateway::Answer::Sent:
+      showNotice(what == Send::Approve ? "Approved" : what == Send::Deny ? "Denied" : "Sent");
+      closeCard();
+      break;
+    case Gateway::Answer::Stale:
+      showNotice("Changed on the host: nothing sent");
+      closeCard();
+      break;
+    case Gateway::Answer::Failed: showNotice("Not sent: " + err); break;
+  }
+}
+
+// Picks the agent to watch: the open one, else a blocked one (rotating
+// through them while the watched one has nothing the X4 can answer).
+void steerWatch(Gateway& gw, Agents& agents) {
+  const Agent* target = nullptr;
+  bool automatic = false;
+  int sel = agents.indexOf(selectedId);
+  if (screen != Screen::List && sel >= 0) {
+    target = &agents[sel];
+  } else {
+    std::vector<int> waiting = agents.waitingOrder();
+    if (waiting.size()) {
+      if (rotate >= waiting.size()) rotate = 0;
+      target = &agents[waiting[rotate]];
+      automatic = true;
+    }
+  }
+  gw.watch(target);
+  if (gw.watchedId() != lastWatched) {
+    lastWatched = gw.watchedId();
+    watchedSince = millis();
+  }
+  if (!automatic) return;
+
+  if (gw.cardPending() && !target->dismissed) {  // take over the list
+    selectedId = target->id;
+    cursor = agents.indexOf(selectedId);
+    openCard(Screen::List);
+  } else if (gw.card().received() && !gw.cardPending() && agents.waitingOrder().size() > 1 &&
+             millis() - watchedSince > ROTATE_MS) {
+    rotate++;
+  }
+}
+
 // Returns true if the input changed what is on screen.
 bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
   switch (view) {
@@ -444,6 +812,7 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
       else if (b.wasPressed(BTN_CONFIRM) && agents.size()) {
         screen = Screen::Detail;
         agents.markSeen(selectedId);
+        agents.setDismissed(selectedId, false);  // opening it asks for its card again
       } else return false;
       return true;
     }
@@ -451,9 +820,13 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
       if (b.wasPressed(BTN_BACK)) screen = Screen::List;
       else if (b.wasPressed(BTN_DOWN)) moveCursor(agents, 1);
       else if (b.wasPressed(BTN_UP)) moveCursor(agents, -1);
-      else return false;
+      else if (b.wasPressed(BTN_CONFIRM) && gw.cardPending() && gw.watchedId() == selectedId) {
+        agents.setDismissed(selectedId, false);
+        openCard(Screen::Detail);
+      } else return false;
       agents.markSeen(selectedId);
       return true;
+    case View::Card: return cardInput(gw, agents, b);
     default: return false;
   }
 }
@@ -491,43 +864,80 @@ void message(const String& title, const String& body) {
   });
 }
 
-void update(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
-  LinkState st = gw.state();
+View viewFor(LinkState st, Agents& agents) {
   bool reconnecting = (st == LinkState::Waiting || st == LinkState::Connecting) && agents.loaded();
-  View view = (st == LinkState::Online || reconnecting) ? (screen == Screen::Detail ? View::Detail : View::List)
-                                                        : View::Status;
-
-  clampCursor(agents);
-  if (view == View::Detail && agents.indexOf(selectedId) < 0) {
-    screen = Screen::List;
-    view = View::List;
+  if (st != LinkState::Online && !reconnecting) return View::Status;
+  switch (screen) {
+    case Screen::Detail: return View::Detail;
+    case Screen::Card: return View::Card;
+    default: return View::List;
   }
+}
+
+void update(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
+  clampCursor(agents);
+  if (screen != Screen::List && agents.indexOf(selectedId) < 0) screen = Screen::List;  // the tab closed
+  steerWatch(gw, agents);
+
+  if (screen == Screen::Detail && gw.cardPending() && gw.watchedId() == selectedId &&
+      !agents[agents.indexOf(selectedId)].dismissed)
+    openCard(Screen::Detail);
+  if (screen == Screen::Card && gw.watchedId() == selectedId) {
+    if (gw.cardPending() && gw.card().key() != cardKey) {  // a new request: start over
+      cardKey = gw.card().key();
+      qIndex = 0;
+      scroll = 0;
+      for (int& c : choices) c = 0;
+    } else if (!gw.cardPending() && gw.card().received() && cardKey.length()) {
+      showNotice("Answered on the host");  // answered elsewhere wins
+      closeCard();
+    }
+  }
+
+  View view = viewFor(gw.state(), agents);
   if (view == View::Detail) changed |= agents.markSeen(selectedId);
 
   bool dirty = handleInput(view, gw, agents, buttons);
-  if (dirty) {  // input may have switched screens
-    view = (view == View::Status) ? View::Status : (screen == Screen::Detail ? View::Detail : View::List);
-  }
+  if (dirty) view = viewFor(gw.state(), agents);  // input may have switched screens
   pending |= changed;
   unsigned long now = millis();
   if (pending && now - lastDrawAt >= MIN_REDRAW_MS) dirty = true;
+  if (notice.length() && !noticeShown()) {
+    notice = "";
+    dirty = true;
+  }
 
   time_t t = time(nullptr);
   long minute = t > 1700000000 ? t / 60 : -1;
-  if (minute != lastMinute && (view == View::List || view == View::Detail)) dirty = true;
+  if (minute != lastMinute && view != View::Status) dirty = true;
 
   bool full = view != lastView;
   if (!dirty && !full) return;
 
+  auto draw = [&](void (*body)(Gateway&, Agents&)) {
+    paint(full, [&] {
+      body(gw, agents);
+      drawNotice();
+    });
+  };
   switch (view) {
-    case View::List: paint(full, [&] { drawList(gw, agents); }); break;
-    case View::Detail: paint(full, [&] { drawDetail(gw, agents); }); break;
-    default: paint(full, [&] { drawStatus(gw, agents); }); break;
+    case View::List: draw(drawList); break;
+    case View::Detail: draw(drawDetail); break;
+    case View::Card: draw(drawCard); break;
+    default: draw(drawStatus); break;
   }
   lastView = view;
   lastMinute = minute;
   lastDrawAt = millis();
   pending = false;
+
+  if (sendAfterDraw != Send::None) {
+    Send what = sendAfterDraw;
+    sendAfterDraw = Send::None;
+    sendAnswer(gw, what);
+    pending = true;
+    lastDrawAt = 0;
+  }
   buttons.resync();
 }
 

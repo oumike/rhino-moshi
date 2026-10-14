@@ -137,8 +137,9 @@ int gatewayRequest(SshLink& link, const char* method, const char* path, const St
   String req = String(method) + " " + path + " HTTP/1.0\r\nHost: 127.0.0.1\r\n";
   if (body.length()) req += "Content-Type: application/json\r\nContent-Length: " + String(body.length()) + "\r\n";
   req += "\r\n";
-  req += body;
-  if (ssh_channel_write(ch, req.c_str(), req.length()) != (int)req.length()) {
+  // The body (a plan can be many KB) goes out as is, never copied into req.
+  if (ssh_channel_write(ch, req.c_str(), req.length()) != (int)req.length() ||
+      (body.length() && ssh_channel_write(ch, body.c_str(), body.length()) != (int)body.length())) {
     closeChannel(ch);
     return -1;
   }

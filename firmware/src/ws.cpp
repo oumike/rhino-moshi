@@ -102,6 +102,13 @@ bool WsClient::skip(size_t len) {
   return true;
 }
 
+void WsClient::trim() {
+  if (cap_ <= 8192) return;
+  free(buf_);
+  buf_ = nullptr;
+  cap_ = len_ = 0;
+}
+
 bool WsClient::reserve(size_t cap) {
   if (cap <= cap_) return true;
   char* p = (char*)realloc(buf_, cap);

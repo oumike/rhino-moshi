@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include "agents.h"
+#include "card.h"
 #include "settings.h"
 #include "ssh_link.h"
 #include "ws.h"
@@ -21,7 +22,8 @@ enum class LinkState {
 
 /**
  * The connection to one host's moshi-hook: SSH session, /events socket and
- * reconnects. Feeds workspace frames into an Agents list.
+ * reconnects. Feeds workspace frames into an Agents list, and follows one
+ * agent's status (its pending approval, plan or question) in a Card.
  */
 class Gateway {
  public:
@@ -44,17 +46,35 @@ class Gateway {
   // Skip any backoff and connect now.
   void retryNow();
 
+  // Point the one agent watch at `a` (nullptr: none). Cheap when unchanged.
+  void watch(const Agent* a);
+  const String& watchedId() const { return watchId_; }
+  const Card& card() const { return card_; }
+  // A request is waiting on the watched agent and wasn't answered from here.
+  bool cardPending() const;
+
+  enum class Answer { Sent, Stale, Failed };
+  // Answer the card: `approve` for approvals, `choices` (one option index per
+  // question) for plans and questions. Blocks for the request. Never retried:
+  // Stale (409) means the request changed on the host and nothing was sent.
+  Answer answer(bool approve, const int* choices, String& error);
+
  private:
   void attempt();
   void fail(LinkState state, const String& detail, bool retry);
   void disconnect();
   bool handleMessage();
+  bool handleAgentStatus();
+  bool sendWatch();
 
   Agents& agents_;
   ssh_key key_ = nullptr;
   HostConfig host_;
   SshLink link_;
   WsClient ws_;
+  Card card_;
+  String watchId_, watchSource_, watchSession_;
+  String answeredKey_;  // last card answered (or found stale) from the X4
   LinkState state_ = LinkState::Connecting;
   String detail_;
   unsigned long nextAttemptAt_ = 0;

@@ -27,6 +27,8 @@ class WsClient {
   // Non-blocking unless data is waiting: then reads one whole message.
   Poll poll();
   const char* message() const { return buf_; }
+  // Free the buffer after an unusually large message, so it isn't held.
+  void trim();
   size_t messageLength() const { return len_; }
 
   // millis() of the last frame of any kind; the liveness signal.

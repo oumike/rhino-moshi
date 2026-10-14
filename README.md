@@ -113,13 +113,15 @@ blocked agent's request (`pendingApproval`, `planMenu`, `pendingPrompt`) only
 arrives on an agent watch. With one socket, the device points its agent watch
 at:
 
-1. the agent whose detail page is open, else
+1. the agent whose detail page or card is open, else
 2. the agent that has been blocked longest, else
 3. nothing.
 
 After that agent is answered or unblocks, the watch moves to the next blocked
-agent. The agents list still shows *every* blocked agent from the tree, and the
-card screen shows "1 of N waiting".
+agent. If the watched agent has nothing answerable (dismissed, or a form the
+X4 can't answer), the watch rotates through the blocked agents every 10 s. The
+agents list still shows *every* blocked agent from the tree, and the card
+header shows "1 of N".
 
 ### Safety rules
 
@@ -130,8 +132,14 @@ card screen shows "1 of N waiting".
 - **No automatic retries** for prompts or keys (per the gateway contract).
 - **Answered elsewhere wins:** when `pendingApproval` or `pendingPrompt`
   disappears from the agent's status updates, the card closes immediately.
-- Multi-select or multi-question forms are shown read-only, with "answer in
-  terminal".
+- **Only blocked agents have cards.** A request can outlive its dialog (an
+  answered plan leaves an `ExitPlanMode` approval in the status while the
+  agent works), so a card shows only while the agent is blocked, per either
+  the `agentStatus` frame or the workspace tree. The tree matters because the
+  frame's status reverts to "working" 30 minutes into a block.
+- Question forms with up to 8 single-select questions are answered on the X4.
+  Multi-select questions, larger forms, or requests missing a `toolUseId` or
+  plan text are shown read-only, with "answer in terminal".
 
 ## Firmware
 
@@ -181,9 +189,17 @@ from `main`. It adds:
 - **Agents:** sorted attention-first (blocked, then done, then by
   `statusChangedAt`). An agent that finishes is re-sorted and marked unseen
   (`•`) until you open it. There's no pop-up.
-- **Card:** takes over when the watched agent has a pending request, unless
-  you're typing. Soft keys map to options. Plans and questions with more than
-  three options use Up/Down to select and Confirm to send.
+- **Card:** takes over from the agents list or detail when the watched agent
+  has a pending request, unless dismissed. Back dismisses it until the agent
+  blocks again (Confirm on the agent reopens it). Right jumps to the next
+  blocked agent. A notice bar reports "Sent", "Changed on the host" (409) or
+  "Answered on the host".
+
+  | Card | Confirm | Left | Up/Down |
+  |---|---|---|---|
+  | Approval | Approve | Deny | Scroll |
+  | Plan | Send option | Page the plan | Select option |
+  | Question | Choose (Send on the last) | Previous question | Select option |
 - **Agent detail:** status, title, latest status line, plus Esc / interrupt /
   prompt actions.
 - **Prompt:** canned prompts stored on the device, plus "Type…", which opens
@@ -232,7 +248,7 @@ from `main`. It adds:
 2. ✅ **Firmware skeleton:** Wi-Fi, key generation, settings page, host key
    pinning (Trust on the X4), SSH session, `/v1/version` probe, `/events`,
    agents list and a read-only agent detail.
-3. **Cards:** approve/deny, plan, question.
+3. ✅ **Cards:** approve/deny, plan, question.
 4. **Detail, keys and prompts:** canned prompts, then the on-screen keyboard.
 5. **Usage**, host switching, settings, refresh tuning.
 

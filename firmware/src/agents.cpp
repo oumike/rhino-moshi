@@ -68,6 +68,7 @@ bool Agents::update(JsonObjectConst workspaces) {
         bool wasBusy = prev.state == AgentState::Working || prev.state == AgentState::Blocked;
         bool nowFinished = a.state == AgentState::Done || a.state == AgentState::Idle;
         a.unseen = (prev.unseen || (wasBusy && nowFinished)) && a.state != AgentState::Working;
+        a.dismissed = prev.dismissed && a.state == AgentState::Blocked && a.changedAt == prev.changedAt;
       }
       next.push_back(a);
     }
@@ -107,4 +108,38 @@ bool Agents::markSeen(const String& id) {
   if (i < 0 || !list_[i].unseen) return false;
   list_[i].unseen = false;
   return true;
+}
+
+void Agents::setDismissed(const String& id, bool dismissed) {
+  int i = indexOf(id);
+  if (i >= 0) list_[i].dismissed = dismissed;
+}
+
+std::vector<int> Agents::waitingOrder() const {
+  std::vector<int> out;
+  for (size_t i = 0; i < list_.size(); i++) {
+    const Agent& a = list_[i];
+    if (a.state == AgentState::Blocked && !a.dismissed && a.session.length()) out.push_back(i);
+  }
+  std::stable_sort(out.begin(), out.end(), [&](int x, int y) { return list_[x].changedAt < list_[y].changedAt; });
+  return out;
+}
+
+int Agents::blockedPosition(const String& id) const {
+  int pos = 0;
+  for (const Agent& a : list_) {
+    if (a.state != AgentState::Blocked) continue;
+    pos++;
+    if (a.id == id) return pos;
+  }
+  return 0;
+}
+
+int Agents::nextBlocked(const String& id) const {
+  int n = list_.size(), from = indexOf(id);
+  for (int k = 1; k <= n; k++) {
+    int i = ((from < 0 ? -1 : from) + k) % n;
+    if (list_[i].state == AgentState::Blocked && !list_[i].session.isEmpty()) return i;
+  }
+  return -1;
 }

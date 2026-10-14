@@ -36,6 +36,7 @@ unsigned long Gateway::retryIn() const {
 void Gateway::disconnect() {
   ws_.reset();
   link_.close();
+  card_.clear();
 }
 
 void Gateway::fail(LinkState state, const String& detail, bool retry) {
@@ -130,7 +131,7 @@ void Gateway::attempt() {
     fail(LinkState::GatewayDown, ch ? "/events: " + err : link_.error(), true);
     return;
   }
-  if (!ws_.sendText("{\"watch\":{\"workspaces\":true,\"usage\":true}}")) {
+  if (!sendWatch()) {
     fail(LinkState::Waiting, "could not send watch", true);
     return;
   }
@@ -144,19 +145,119 @@ void Gateway::attempt() {
   changed_ = true;
 }
 
+bool Gateway::sendWatch() {
+  JsonDocument w;
+  JsonObject watch = w["watch"].to<JsonObject>();
+  watch["workspaces"] = true;
+  watch["usage"] = true;
+  if (watchSession_.length()) {
+    watch["agent"]["source"] = watchSource_;
+    watch["agent"]["session"] = watchSession_;
+  }
+  String text;
+  serializeJson(w, text);
+  return ws_.sendText(text);
+}
+
+void Gateway::watch(const Agent* a) {
+  String id = a ? a->id : String();
+  String session = a ? a->session : String();
+  if (id == watchId_ && session == watchSession_) return;
+  watchId_ = id;
+  watchSource_ = a ? a->kind : String();
+  watchSession_ = session;
+  card_.clear();
+  changed_ = true;
+  Serial.printf("[gw] watching %s\n", id.length() ? id.c_str() : "no agent");
+  if (state_ == LinkState::Online && !sendWatch()) fail(LinkState::Waiting, "connection lost", true);
+}
+
+bool Gateway::cardPending() const {
+  if (!card_.received() || card_.key().isEmpty() || card_.key() == answeredKey_) return false;
+  // Requests can outlive their dialog: after a plan menu is answered, its
+  // ExitPlanMode approval lingers while the agent works and idles. Only a
+  // blocked agent is waiting on anything. The frame's status alone isn't
+  // enough: it reverts to "working" 30 minutes into a block, while the tree
+  // (read from the screen) still says blocked.
+  if (card_.oversized() || card_.blocked()) return true;
+  int i = agents_.indexOf(watchId_);
+  return i >= 0 && agents_[i].state == AgentState::Blocked;
+}
+
+bool Gateway::handleAgentStatus() {
+  static JsonDocument filter;
+  if (filter.isNull()) Card::buildFilter(filter);
+
+  String oldKey = card_.key();
+  bool wasReceived = card_.received();
+  JsonDocument& doc = card_.beginUpdate();
+  DeserializationError err =
+      deserializeJson(doc, ws_.message(), ws_.messageLength(), DeserializationOption::Filter(filter));
+  if (err == DeserializationError::NoMemory) {
+    Serial.printf("[gw] agent status of %u bytes: no memory\n", (unsigned)ws_.messageLength());
+    card_.markOversized();
+  } else {
+    // Frames for a previous watch can still be in flight after a re-watch.
+    bool ours = !err && watchSession_ == (const char*)(doc["agentStatus"]["session"] | "");
+    if (err) Serial.printf("[gw] agent status: %s\n", err.c_str());
+    if (!card_.endUpdate(ours)) {
+      if (!err) card_.clear();  // not ours: keep waiting for the right one
+    }
+  }
+  return card_.key() != oldKey || card_.received() != wasReceived;
+}
+
 bool Gateway::handleMessage() {
   static JsonDocument filter;
   if (filter.isNull()) Agents::buildFilter(filter);
 
-  JsonDocument doc;
-  DeserializationError err =
-      deserializeJson(doc, ws_.message(), ws_.messageLength(), DeserializationOption::Filter(filter));
-  if (err) {
-    Serial.printf("[gw] frame of %u bytes: %s\n", (unsigned)ws_.messageLength(), err.c_str());
-    return false;
+  // Tabs carry `"agentStatus":"working"`; only the top-level frame is an object.
+  const char* msg = ws_.message();
+  bool changed = false;
+  if (strstr(msg, "\"workspaces\":{")) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, msg, ws_.messageLength(), DeserializationOption::Filter(filter));
+    if (err) Serial.printf("[gw] frame of %u bytes: %s\n", (unsigned)ws_.messageLength(), err.c_str());
+    else if (JsonObjectConst ws = doc["workspaces"]) changed |= agents_.update(ws);
   }
-  JsonObjectConst ws = doc["workspaces"];
-  return ws ? agents_.update(ws) : false;
+  if (watchSession_.length() && strstr(msg, "\"agentStatus\":{")) changed |= handleAgentStatus();
+  return changed;
+}
+
+Gateway::Answer Gateway::answer(bool approve, const int* choices, String& error) {
+  if (state_ != LinkState::Online || !cardPending()) {
+    error = "Not connected";
+    return Answer::Failed;
+  }
+  String body;
+  const char* path = card_.answerRequest(approve, choices, body);
+  if (!path) {
+    error = "Can't answer this from the X4";
+    return Answer::Failed;
+  }
+  unsigned long t0 = millis();
+  String resp;
+  int status = gatewayRequest(link_, "POST", path, body, resp, 1024);
+  body = String();
+  Serial.printf("[gw] POST %s -> %d in %lu ms %s\n", path, status, millis() - t0, resp.c_str());
+  if (status == 200) {
+    answeredKey_ = card_.key();
+    changed_ = true;
+    return Answer::Sent;
+  }
+  if (status == 409) {
+    answeredKey_ = card_.key();
+    changed_ = true;
+    return Answer::Stale;
+  }
+  if (status < 0) {
+    error = "No answer from moshi-hook";
+  } else {
+    JsonDocument e;
+    error = (!deserializeJson(e, resp) && e["error"].is<const char*>()) ? String((const char*)e["error"])
+                                                                         : "HTTP " + String(status);
+  }
+  return Answer::Failed;
 }
 
 bool Gateway::poll() {
@@ -178,9 +279,15 @@ bool Gateway::poll() {
         }
         if (p == WsClient::Poll::Oversized) {
           Serial.println("[gw] dropped an oversized frame");
+          // Workspace frames stay well under the cap; a huge one is a plan.
+          if (watchSession_.length()) {
+            card_.markOversized();
+            changed_ = true;
+          }
           continue;
         }
         changed_ |= handleMessage();
+        ws_.trim();
       }
       if (state_ != LinkState::Online) break;
       unsigned long now = millis();
