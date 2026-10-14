@@ -40,17 +40,23 @@
 // Measured idle/pressed values (Adafruit, calibrated on hardware):
 //   ADC1: idle ~58107, Back ~50972, Confirm ~39531, Left ~22083, Right ~63
 //   ADC2: idle ~58107, Up ~32985, Down ~61
+// Measured on our X4 with this firmware (ESP32 ADC, 11 dB):
+//   ADC1: idle 65520, Back ~55780, Confirm ~42710, Left ~23750, Right ~50
+//   ADC2: idle 65520, Up ~35530, Down ~60
+// The thresholds below sit midway between those neighbours.
 //
 // A reading is button i when RANGES[i+1] < raw <= RANGES[i]; anything above
-// RANGES[0] is idle. Run `rhino-companion calibrate` if your unit differs --
-// board revisions can shift the ladder.
+// RANGES[0] is idle. Board revisions can shift the ladder: if a button never
+// registers, log Buttons::rawAdc1()/rawAdc2() over serial and re-centre these.
 // ---------------------------------------------------------------------------
 #define PIN_BUTTON_ADC_1 1  // Back, Confirm, Left, Right
 #define PIN_BUTTON_ADC_2 2  // Up, Down
 #define PIN_BUTTON_POWER 3  // digital, active-low, needs INPUT_PULLUP
 
-static const int BUTTON_ADC_1_RANGES[] = {54000, 45000, 30000, 11000, -1};
-static const int BUTTON_ADC_2_RANGES[] = {45000, 16000, -1};
+// Adafruit's thresholds (54000, 45000, 30000, 11000 / 45000, 16000) put our
+// Back above the idle boundary, so it never registered.
+static const int BUTTON_ADC_1_RANGES[] = {60500, 49000, 33000, 12000, -1};
+static const int BUTTON_ADC_2_RANGES[] = {50500, 18000, -1};
 static const uint8_t BUTTON_ADC_1_COUNT = 4;
 static const uint8_t BUTTON_ADC_2_COUNT = 2;
 

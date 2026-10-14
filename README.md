@@ -196,7 +196,7 @@ from `main`. It adds:
   current SSH session first. A new host shows its fingerprint for Trust or
   Cancel.
 - **Usage:** per-agent rate-limit windows with reset times.
-- **Settings:** rotation, button calibration, hosts, canned prompts, open
+- **Settings:** hosts, canned prompts, open
   the settings page, show the X4's key fingerprint, regenerate the key (every
   host must re-authorize), and reset Wi-Fi.
 
@@ -226,11 +226,12 @@ from `main`. It adds:
 
 ## Build order
 
-1. **Spike:** use `ssh -W 127.0.0.1:24543 host` plus `websocat` to capture
+1. ✅ **Spike:** use `ssh -W 127.0.0.1:24543 host` plus `websocat` to capture
    frames; on the X4, get libssh to open a channel and fetch `/v1/version`
    while measuring heap.
-2. **Firmware skeleton:** Wi-Fi, key generation, settings page, host key
-   pinning, SSH session, `/v1/version` probe, `/events`, agents list.
+2. ✅ **Firmware skeleton:** Wi-Fi, key generation, settings page, host key
+   pinning (Trust on the X4), SSH session, `/v1/version` probe, `/events`,
+   agents list and a read-only agent detail.
 3. **Cards:** approve/deny, plan, question.
 4. **Detail, keys and prompts:** canned prompts, then the on-screen keyboard.
 5. **Usage**, host switching, settings, refresh tuning.
@@ -245,5 +246,6 @@ from `main`. It adds:
 - **Multiple machines:** each runs its own moshi-hook. The device connects to
   one at a time and switches between them.
 - **Finished agents:** re-sorted and marked as unseen, with no pop-up.
-- **Rotate / calibrate:** device settings menu. `docs/flashing.md` must drop
-  the old `rhino-companion` CLI commands.
+- **Rotation:** on the settings page. **Button calibration:** none on the
+  device; the ladder thresholds in `board.h` are measured on hardware.
+  `docs/flashing.md` must drop the old `rhino-companion` CLI commands.
