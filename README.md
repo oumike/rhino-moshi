@@ -261,7 +261,32 @@ Over USB serial (115200), single characters drive the X4 without touching it:
 `b` `c` `l` `r` `u` `d` press Back, Confirm, Left, Right, Up and Down, `h`
 holds Back for a second, and `s` dumps the screen as base64 between
 `SHOT <width> <height> <rotation>` and `END` (the panel's native 800×480
-frame, 1 bit per pixel, set bits white).
+frame, 1 bit per pixel, set bits white). `m` presses Home (the M9's key), and
+text between double quotes is typed as if on a keyboard. On the M9, `s` dumps
+`SHOT565 320 240` instead: RGB565, little-endian.
+
+### ThinkNode M9
+
+The same firmware builds for the Elecrow ThinkNode M9 (ESP32-S3 with PSRAM,
+a 320×240 ST7789 TFT and an I2C QWERTY keyboard). The parts that differ sit
+behind seams:
+
+- `include/boards/x4.h` and `boards/m9.h` hold the pins; `board.h` picks one
+  and defines the shared buttons (Back … Power, plus Home).
+- `src/panel.h` is the screen: GxEPD2 on the X4, a minimal ST7789 driver
+  drawing a PSRAM canvas on the M9. Colours go through roles (`color::FG`,
+  `SEL_BG`, `BLOCKED`, …), all black or white on e-paper.
+- `ui.cpp` passes every measurement through `S()`, the identity on the X4 and
+  two thirds on the compact 320×240 layout, which also uses smaller fonts
+  (including a generated FreeSans 7pt) and a few compact-only screens.
+- On the M9, typing on an agent's screens starts a prompt with that letter,
+  Enter sends it, Del deletes and holding Del cancels; Home opens the list.
+
+Environments: `xteink_x4`, `thinknode_m9`, and `x4_compact_preview`, which
+draws the M9 layout in black and white in the top-left 320×240 of an X4 in
+landscape so it can be checked from screenshots. Not yet checked on M9
+hardware: the backlight polarity, the rotation, the colour order, and the
+keyboard's register and key codes (the firmware logs raw codes as `[kb]`).
 
 ## Risks to verify early
 

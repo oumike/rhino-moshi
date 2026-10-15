@@ -35,6 +35,9 @@ const int FOOTER_H = 24;
 const int ROW_H = 46;
 const int OPTION_H = 28;       // option row without a description
 const int OPTION_DESC_H = 42;  // with one
+// Baselines within a row; the smaller fonts shrink less than two thirds.
+const int ROW_NAME_Y = 20, ROW_SUB_Y = 38;
+const int OPT_LABEL_Y = 18, OPT_HINT_Y = 33;
 #else
 constexpr int S(int n) { return n; }
 const GFXfont* F_TITLE = &FreeSansBold18pt7b;
@@ -46,6 +49,8 @@ const int FOOTER_H = 58;
 const int ROW_H = 76;
 const int OPTION_H = 44;
 const int OPTION_DESC_H = 66;
+const int ROW_NAME_Y = 32, ROW_SUB_Y = 62;
+const int OPT_LABEL_Y = 29, OPT_HINT_Y = 54;
 #endif
 
 const int MARGIN = S(14);
@@ -515,16 +520,16 @@ void drawList(Gateway& gw, Agents& agents) {
     if (ago.length()) right += "  " + ago;
     display.setFont(F_SMALL);
     int rw = textWidth(right);
-    text(W() - MARGIN - rw, y + S(31), right, F_SMALL, sel ? fg : color::MUTED);
+    text(W() - MARGIN - rw, y + ROW_NAME_Y - 1, right, F_SMALL, sel ? fg : color::MUTED);
 
     String name = ascii(a.workspace);
     if (a.tab.length() && a.tab != "1") name += " / " + ascii(a.tab);
     display.setFont(F_BOLD);
-    text(TEXT_X, y + S(32), fit(name, W() - TEXT_X - MARGIN - rw - S(10)), F_BOLD, fg);
+    text(TEXT_X, y + ROW_NAME_Y, fit(name, W() - TEXT_X - MARGIN - rw - S(10)), F_BOLD, fg);
 
     String sub = a.title.length() ? ascii(a.title) : String(stateName(a.state));
     display.setFont(F_TEXT);
-    text(TEXT_X, y + S(62), fit(sub, W() - TEXT_X - MARGIN), F_TEXT, fg);
+    text(TEXT_X, y + ROW_SUB_Y, fit(sub, W() - TEXT_X - MARGIN), F_TEXT, fg);
     if (!sel) display.drawFastHLine(TEXT_X, y + ROW_H - 1, W() - TEXT_X - MARGIN, color::RULE);
   }
 
@@ -608,10 +613,10 @@ void menuRows(const std::vector<String>& labels, const std::vector<String>& hint
     if (on) display.fillRect(0, y, W(), rowH - S(4), color::SEL_BG);
     else display.drawRect(MARGIN / 2, y, W() - MARGIN, rowH - S(4), color::RULE);
     display.setFont(F_BOLD);
-    text(MARGIN, y + S(29), fit(labels[i], W() - 2 * MARGIN), F_BOLD, fg);
+    text(MARGIN, y + (anyHint ? OPT_LABEL_Y : S(29)), fit(labels[i], W() - 2 * MARGIN), F_BOLD, fg);
     if (i < (int)hints.size() && hints[i].length()) {
       display.setFont(F_SMALL);
-      text(MARGIN + S(26), y + S(54), fit(hints[i], W() - 2 * MARGIN - S(26)), F_SMALL, on ? fg : color::MUTED);
+      text(MARGIN + S(26), y + OPT_HINT_Y, fit(hints[i], W() - 2 * MARGIN - S(26)), F_SMALL, on ? fg : color::MUTED);
     }
   }
   if (first + rows < n) {
@@ -1011,7 +1016,7 @@ void drawUsage(Gateway& gw, Agents& agents) {
   bool clock = now > 1700000000;
   for (int i = usageFirst; i < (int)accs.size(); i++) {
     const UsageAccount& a = accs[i];
-    if (i > usageFirst && y + S(90) + S(90) * (int)a.windows.size() > bottom) {
+    if (i > usageFirst && y + S(90) + (LAYOUT_COMPACT ? 37 : 90) * (int)a.windows.size() > bottom) {
       usageMore = true;
       break;
     }
@@ -1030,6 +1035,30 @@ void drawUsage(Gateway& gw, Agents& agents) {
     text(MARGIN, y, fit(ascii(label), W() - 2 * MARGIN), F_SMALL, color::MUTED);
     y += S(14);
     for (const UsageWindow& w : a.windows) {
+#if LAYOUT_COMPACT
+      {
+      // One line per window ("5h  resets in 4h ... 12% used") over a thin bar.
+      y += 18;
+      String wl = ascii(w.label);
+      display.setFont(F_BOLD);
+      text(MARGIN, y, wl, F_BOLD);
+      int lx = MARGIN + textWidth(wl) + 8;
+      String pct = String(w.used) + "% used";
+      display.setFont(F_TEXT);
+      text(W() - MARGIN - textWidth(pct), y, pct, F_TEXT);
+      if (clock && w.resetsAt > 0) {
+        long left = (long)(w.resetsAt - now);
+        text(lx, y, left > 0 ? "resets in " + span(left) : String("resetting now"), F_SMALL, color::MUTED);
+      }
+      y += 5;
+      int bw = W() - 2 * MARGIN, bh = 10;
+      display.drawRect(MARGIN, y, bw, bh, color::RULE);
+      display.fillRect(MARGIN + 2, y + 2, (bw - 4) * min(w.used, 100) / 100, bh - 4,
+                       w.used >= 90 ? color::BLOCKED : color::BAR);
+      y += bh + 4;
+      continue;
+      }
+#endif
       y += S(30);
       text(MARGIN, y, ascii(w.label), F_BOLD);
       String pct = String(w.used) + "% used";
@@ -1086,6 +1115,23 @@ void drawDevice(Gateway& gw, Agents& agents) {
   header(gw, agents);
   title("Device");
   int y = HEADER_H + S(60);
+#if LAYOUT_COMPACT
+  const int LABEL_W = 84, LINE_H = 15;
+  y += 12 - LINE_H;
+  auto row = [&](const char* label, const String& value, const GFXfont*, int) {
+    y += LINE_H;
+    text(MARGIN, y, label, F_SMALL, color::MUTED);
+    display.setFont(F_SMALL);
+    bool first = true;
+    for (const String& line : wrap(value, W() - 2 * MARGIN - LABEL_W, 2)) {
+      if (!first) y += LINE_H;
+      text(MARGIN + LABEL_W, y, line, F_SMALL);
+      first = false;
+    }
+  };
+  row("Settings", String("http://") + config_server::HOSTNAME + ".local", F_TEXT, 0);
+  row("", "http://" + WiFi.localIP().toString(), F_TEXT, 0);
+#else
   auto row = [&](const char* label, const String& value, const GFXfont* font, int lineH) {
     y += S(30);
     text(MARGIN, y, label, F_SMALL, color::MUTED);
@@ -1100,6 +1146,7 @@ void drawDevice(Gateway& gw, Agents& agents) {
   row("Settings page", String("http://") + config_server::HOSTNAME + ".local", F_TEXT, S(30));
   y += S(30);
   text(MARGIN, y, "http://" + WiFi.localIP().toString(), F_TEXT);
+#endif
   row("Wi-Fi", ascii(WiFi.SSID()) + "  (" + String(WiFi.RSSI()) + " dBm)", F_TEXT, S(30));
   row("Device key", gw.deviceKeyFingerprint(), F_SMALL, S(24));
   float volts = analogReadMilliVolts(PIN_BATTERY_ADC) * BATTERY_DIVIDER / 1000.0f;
