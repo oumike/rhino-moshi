@@ -34,6 +34,9 @@ void Card::buildFilter(JsonDocument& filter) {
   s["source"] = true;
   s["session"] = true;
   s["status"] = true;
+  s["modelName"] = true;
+  s["contextRemaining"] = true;
+  s["ephemeral"]["lines"] = true;
   JsonObject a = s["pendingApproval"].to<JsonObject>();
   for (const char* k : {"actionId", "title", "message", "toolName"}) a[k] = true;
   s["planMenu"]["title"] = true;

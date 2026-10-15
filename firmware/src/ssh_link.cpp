@@ -132,7 +132,10 @@ int gatewayRequest(SshLink& link, const char* method, const char* path, const St
                    size_t maxResponse) {
   response = "";
   ssh_channel ch = link.openGateway();
-  if (!ch) return -1;
+  if (!ch) {
+    Serial.printf("[ssh] open forward failed: %s\n", link.error().c_str());
+    return -1;
+  }
 
   String req = String(method) + " " + path + " HTTP/1.0\r\nHost: 127.0.0.1\r\n";
   if (body.length()) req += "Content-Type: application/json\r\nContent-Length: " + String(body.length()) + "\r\n";
@@ -151,6 +154,9 @@ int gatewayRequest(SshLink& link, const char* method, const char* path, const St
     if (raw.length() + n > maxResponse + 1024) break;  // headers + capped body
     raw.concat(buf, n);
   }
+  if (n < 0 || raw.isEmpty())
+    Serial.printf("[ssh] read ended with %d after %u bytes, eof=%d\n", n, (unsigned)raw.length(),
+                  ssh_channel_is_eof(ch));
   closeChannel(ch);
 
   // "HTTP/1.1 200 OK"

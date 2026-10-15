@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 
+#include <vector>
+
 // One SSH host the X4 can connect to. Stored in NVS; edited in the setup portal.
 struct HostConfig {
   String name;
@@ -39,6 +41,14 @@ void saveHost(const HostConfig& host);
 String pinnedHostKey();
 void pinHostKey(const String& fingerprint);
 void forgetHostKey();
+
+// Canned prompts for the Prompt menu, in order. Defaults until saved.
+const size_t MAX_PROMPTS = 20;
+const size_t MAX_PROMPT_LEN = 300;
+std::vector<String> prompts();
+// One prompt per line; blank lines are dropped and the rest capped to the limits above.
+void savePrompts(const String& lines);
+String promptsText();  // as saved: one per line
 
 // The X4's own SSH private key (OpenSSH base64), empty until generated.
 String deviceKey();

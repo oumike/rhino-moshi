@@ -111,6 +111,56 @@ void forgetHostKey() {
   p.end();
 }
 
+const char* DEFAULT_PROMPTS =
+    "Continue\n"
+    "Yes\n"
+    "No\n"
+    "Run the tests and fix any failures\n"
+    "Summarize what you've done so far\n"
+    "Commit your changes";
+
+String promptsText() {
+  Preferences p;
+  p.begin(NS, true);
+  String s = p.isKey("prompts") ? p.getString("prompts", "") : String(DEFAULT_PROMPTS);
+  p.end();
+  return s;
+}
+
+std::vector<String> prompts() {
+  std::vector<String> out;
+  String s = promptsText() + "\n";
+  int start = 0;
+  while (start < (int)s.length() && out.size() < MAX_PROMPTS) {
+    int nl = s.indexOf('\n', start);
+    String line = s.substring(start, nl);
+    line.trim();
+    if (line.length()) out.push_back(line.substring(0, MAX_PROMPT_LEN));
+    start = nl + 1;
+  }
+  return out;
+}
+
+void savePrompts(const String& lines) {
+  String clean;
+  String s = lines + "\n";
+  int start = 0, n = 0;
+  while (start < (int)s.length() && n < (int)MAX_PROMPTS) {
+    int nl = s.indexOf('\n', start);
+    String line = s.substring(start, nl);
+    line.trim();  // also drops the \r of browser line endings
+    if (line.length()) {
+      if (n++) clean += '\n';
+      clean += line.substring(0, MAX_PROMPT_LEN);
+    }
+    start = nl + 1;
+  }
+  Preferences p;
+  p.begin(NS, false);
+  p.putString("prompts", clean);
+  p.end();
+}
+
 String deviceKey() {
   Preferences p;
   p.begin(NS, true);

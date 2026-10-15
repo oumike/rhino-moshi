@@ -55,6 +55,11 @@ class Card {
   const char* session() const { return status()["session"] | ""; }
   bool blocked() const { return !strcmp(status()["status"] | "", "blocked"); }
 
+  // Live details for the agent page.
+  const char* modelName() const { return status()["modelName"] | ""; }
+  int contextRemaining() const { return status()["contextRemaining"] | -1; }  // percent, or -1
+  JsonArrayConst activity() const { return status()["ephemeral"]["lines"]; }   // "Thinking... (12s)"
+
   // Approval
   const char* toolName() const { return approval()["toolName"] | ""; }
   const char* approvalTitle() const { return approval()["title"] | ""; }

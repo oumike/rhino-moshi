@@ -33,12 +33,26 @@ class Buttons {
    */
   void resync(unsigned long settleMs = SETTLE_MS);
 
+  /**
+   * Keep reading through a panel refresh: between these, call update() from
+   * the panel's busy wait and the events it finds are queued instead of
+   * reported. The ladders read clean while the panel is busy (measured), so
+   * this is safe; endCapture(false) drops the queue and resyncs as before.
+   */
+  void beginCapture();
+  void endCapture(bool keep);
+  // Moves the next queued event into wasPressed()/wasReleased(); false if none.
+  bool replay();
+  bool queued() const { return queueLen_ > 0; }
+  void clearQueue() { queueLen_ = 0; }
+
   bool isPressed(uint8_t button) const { return current_ & (1 << button); }
   bool wasPressed(uint8_t button) const { return pressedEvents_ & (1 << button); }
   bool wasReleased(uint8_t button) const { return releasedEvents_ & (1 << button); }
   bool wasAnyPressed() const { return pressedEvents_ != 0; }
 
-  // How long the current (or most recent) press has lasted, in ms.
+  // How long the current (or most recent) press has lasted, in ms. For a
+  // replayed release, how long that press lasted.
   unsigned long heldTime() const;
 
   // Raw ladder readings in 16-bit space, for `calibrate`.
@@ -49,6 +63,19 @@ class Buttons {
 
  private:
   uint16_t readState();
+  void push();
+
+  struct Event {
+    uint8_t pressed, released;
+    unsigned long held;
+  };
+  static const int QUEUE_SIZE = 16;
+  Event queue_[QUEUE_SIZE];
+  int queueHead_ = 0;
+  int queueLen_ = 0;
+  bool capturing_ = false;
+  bool replaying_ = false;
+  unsigned long replayHeld_ = 0;
 
   uint8_t current_ = 0;
   uint8_t last_ = 0;

@@ -23,7 +23,7 @@ bool setupMode = false;
 unsigned long restartAt = 0;
 String upload;          // body of a backup file being uploaded
 bool uploadTooLarge = false;
-const size_t MAX_UPLOAD = 8192;
+const size_t MAX_UPLOAD = 16384;
 
 String esc(const String& s) {
   String out;
@@ -119,6 +119,11 @@ void handleRoot() {
   b += String("<option value=3") + (rot != 1 ? " selected" : "") + ">Portrait</option>";
   b += String("<option value=1") + (rot == 1 ? " selected" : "") + ">Portrait, upside down</option>";
   b += F("</select>");
+
+  b += F("<h2>Prompts</h2><p class=hint>Canned prompts for the X4's Prompt menu, one per line, in order (up to "
+         "20).</p><textarea name=prompts rows=8 style='font-family:inherit;font-size:1em'>");
+  b += esc(settings::promptsText());
+  b += F("</textarea>");
 
   b += F("<h2>This page</h2><label>Password</label><input name=web_pw type=password autocomplete=new-password "
          "placeholder='");
@@ -237,6 +242,7 @@ void handleSave() {
   if (server.hasArg("forget_fp")) settings::forgetHostKey();
 
   settings::saveRotation(server.arg("rotation").toInt() == 1 ? 1 : 3);
+  if (server.hasArg("prompts")) settings::savePrompts(server.arg("prompts"));
 
   if (server.hasArg("clear_pw")) {
     settings::saveWebPassword("");

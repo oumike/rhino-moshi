@@ -48,9 +48,38 @@ void Buttons::resync(unsigned long settleMs) {
   last_ = state;
   pressedEvents_ = 0;
   releasedEvents_ = 0;
+  queueLen_ = 0;
+  replaying_ = false;
   lastDebounceAt_ = millis();
   settleStartedAt_ = lastDebounceAt_;
   settleMs_ = settleMs;
+}
+
+void Buttons::beginCapture() {
+  capturing_ = true;
+}
+
+void Buttons::endCapture(bool keep) {
+  capturing_ = false;
+  if (!keep) resync();
+}
+
+void Buttons::push() {
+  if (queueLen_ >= QUEUE_SIZE) return;
+  queue_[(queueHead_ + queueLen_) % QUEUE_SIZE] = {pressedEvents_, releasedEvents_, releasedEvents_ ? heldTime() : 0};
+  queueLen_++;
+}
+
+bool Buttons::replay() {
+  if (!queueLen_) return false;
+  const Event& e = queue_[queueHead_];
+  queueHead_ = (queueHead_ + 1) % QUEUE_SIZE;
+  queueLen_--;
+  pressedEvents_ = e.pressed;
+  releasedEvents_ = e.released;
+  replaying_ = e.released != 0;
+  replayHeld_ = e.held;
+  return true;
 }
 
 void Buttons::update() {
@@ -59,6 +88,7 @@ void Buttons::update() {
 
   pressedEvents_ = 0;
   releasedEvents_ = 0;
+  replaying_ = false;
 
   // Inside the post-refresh settling window, keep the baseline following the
   // reading but refuse to emit events. A rail still recovering from a refresh
@@ -90,9 +120,17 @@ void Buttons::update() {
   if (releasedEvents_ && state == 0) pressFinishedAt_ = now;
 
   current_ = state;
+
+  // Keep order: while anything is queued, new events join the back of it.
+  if (capturing_ || queueLen_) {
+    push();
+    pressedEvents_ = 0;
+    releasedEvents_ = 0;
+  }
 }
 
 unsigned long Buttons::heldTime() const {
+  if (replaying_) return replayHeld_;
   if (current_ != 0) return millis() - pressStartedAt_;
   return pressFinishedAt_ - pressStartedAt_;
 }

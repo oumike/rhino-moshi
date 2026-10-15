@@ -1,8 +1,8 @@
 # Rhino Companion — Moshi client for the Xteink X4
 
-> **Status: design.** This branch is a fresh start. Only the X4 board
+> **Status: in development.** This branch is a fresh start. Only the X4 board
 > definition, the button driver and the flashing tool carry over from `main`.
-> This README is the plan for review before any code is written.
+> This README is the design; the build order at the end tracks progress.
 
 Turn an [Xteink X4](https://www.xteink.com/products/xteink-x4) into a desk
 console for coding agents running under [Moshi](https://getmoshi.app) and
@@ -102,7 +102,7 @@ almost nothing on an established session.
 | Approve / deny | `POST /v1/approvals/answer` with `actionId` |
 | Plan menu choice | `POST /v1/plans/answer` (echoes title, plan and options from `agentStatus`) |
 | Single-choice question | `POST /v1/questions/answer` (only when every question is single-select) |
-| Esc / interrupt | `POST /v1/keys` `["Escape"]`, `["C-c"]` |
+| Keys (Esc, interrupt, Enter, Shift-Tab, Tab, Up, Down) | `POST /v1/keys` with one of `Escape`, `C-c`, `Enter`, `BTab`, `Tab`, `Up`, `Down` |
 | Prompt (canned or typed) | `POST /v1/prompt` |
 | Pick herdr session | `GET /v1/muxes`, then `mux=` on the watch |
 
@@ -156,7 +156,8 @@ from `main`. It adds:
 - **Settings page:** a plain web page at `http://rhino-x4.local` on the LAN.
   It handles Wi-Fi credentials, shows the `authorized_keys` line, takes host
   entries (name, address, port, user), shows and forgets the pinned host key,
-  sets orientation (portrait by default), and sets an optional page password
+  sets orientation (portrait by default), edits the canned prompts (one per
+  line, up to 20 of 300 characters), and sets an optional page password
   (HTTP Basic auth, user `admin`; none by default).
 - **Setup mode:** with no saved Wi-Fi (fresh install), or with Back held at
   boot, the X4 runs an open access point `Rhino-X4-Setup` and serves the same
@@ -175,14 +176,14 @@ from `main`. It adds:
 ┌────────────────────────┐   ┌────────────────────────┐   ┌────────────────────────┐
 │ laptop      ●  5h 42%  │   │ laptop    1 of 3 ⧗ 5m  │   │ app-moshi / 1   claude │
 │────────────────────────│   │────────────────────────│   │ Fix login redirect     │
-│▶! app-moshi  claude 5m │   │ app-moshi · claude     │   │ blocked 5m · ctx 42%   │
+│▶! app-moshi  claude 5m │   │ app-moshi · claude     │   │ opus · 42% context left│
 │   Fix login redirect   │   │ Bash                   │   │────────────────────────│
-│ ~ api        codex  45s│   │                        │   │ Running tests…         │
+│ ~ api        codex  45s│   │                        │   │ > Running tests…       │
 │   Running tests…       │   │ touch /tmp/probe       │   │                        │
 │ ✓•docs       claude 2h │   │                        │   │                        │
 │ · scratch    shell     │   │                        │   │                        │
 ├────────────────────────┤   ├────────────────────────┤   ├────────────────────────┤
-│ Hosts│ Open │ Usage│Menu│   │ Back │ Deny │Approve│  │   │ Back │ Esc │Prompt│Keys│
+│ Hosts│ Open │ Usage│Menu│   │ Back │ Deny │Approve│  │   │ Back │Answer│Keys│Prompt│
 └────────────────────────┘   └────────────────────────┘   └────────────────────────┘
 ```
 
@@ -200,13 +201,20 @@ from `main`. It adds:
   | Approval | Approve | Deny | Scroll |
   | Plan | Send option | Page the plan | Select option |
   | Question | Choose (Send on the last) | Previous question | Select option |
-- **Agent detail:** status, title, latest status line, plus Esc / interrupt /
-  prompt actions.
-- **Prompt:** canned prompts stored on the device, plus "Type…", which opens
-  the keyboard.
-- **Keyboard:** a 4-row grid. Up/Down change rows, Left/Right move along a row,
-  Confirm types, Back deletes, and holding Back cancels. Meant for short
-  prompts.
+- **Agent detail:** status, title, model and context left, and the live
+  activity line (redrawn at most every 10 s). Answer reopens a pending card,
+  Keys and Prompt open the screens below (only for agents with a session).
+- **Keys:** Esc, Ctrl-C, Enter, Shift-Tab, Tab, Up and Down. Confirm sends the
+  selected key and stays on the screen, so Shift-Tab can be pressed again to
+  cycle Claude's mode. The gateway doesn't report the mode, so the X4 can't
+  show it.
+- **Prompt:** "Type a prompt…", which opens the keyboard, then the canned
+  prompts (edited on the settings page). Confirm sends a canned prompt; Right
+  opens it in the keyboard to edit first.
+- **Keyboard:** a 5-row grid: digits, three letter rows, then Shift, a
+  symbols layer, space and Send. Up/Down change rows, Left/Right move along a
+  row (both wrap), Confirm types, Back deletes, and holding Back cancels.
+  Meant for short prompts.
 - **Hosts:** configured hosts with their state (connected, unreachable, key
   not authorized, host key changed). Confirm switches hosts, closing the
   current SSH session first. A new host shows its fingerprint for Trust or
@@ -218,10 +226,15 @@ from `main`. It adds:
 
 ### Refresh policy
 
-- Partial refresh for list rows, the header and the cursor. Full refresh on
-  screen changes and every N partials.
-- Ephemeral status lines update at most every 10 s, and only with a partial
-  refresh.
+- Partial refreshes (~0.6 s) for everything, including screen changes. A
+  full refresh (~1.8 s, with a flash) clears the ghosting partials leave:
+  after 15 partials at the next screen change, or after 30 anywhere except
+  the keyboard.
+- Frames go to the panel in one 20 MHz SPI burst rather than byte by byte.
+- Buttons are read through a refresh, and presses made during one are replayed
+  in order afterwards, so a burst of moves costs one refresh. They are dropped
+  if the screen changed under them, or on a decision card.
+- Ephemeral status lines update at most every 10 s.
 - Wi-Fi stays associated while connected. USB power is expected for all-day
   use.
 
@@ -249,7 +262,7 @@ from `main`. It adds:
    pinning (Trust on the X4), SSH session, `/v1/version` probe, `/events`,
    agents list and a read-only agent detail.
 3. ✅ **Cards:** approve/deny, plan, question.
-4. **Detail, keys and prompts:** canned prompts, then the on-screen keyboard.
+4. ✅ **Detail, keys and prompts:** canned prompts, then the on-screen keyboard.
 5. **Usage**, host switching, settings, refresh tuning.
 
 ## Decisions

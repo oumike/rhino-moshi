@@ -15,7 +15,7 @@ namespace {
 
 const char* FORMAT = "rhino-x4-backup";
 const int VERSION = 1;
-const size_t MAX_SIZE = 8192;
+const size_t MAX_SIZE = 16384;
 
 // The card shares the SPI bus with the panel. Mount only for the duration of
 // one operation so the card can be pulled at any other time.
@@ -51,6 +51,8 @@ String toJson() {
   doc["web"]["password"] = settings::webPassword();
   doc["deviceKey"] = settings::deviceKey();
 
+  JsonArray prompts = doc["prompts"].to<JsonArray>();
+  for (const String& p : settings::prompts()) prompts.add(p);
   String out;
   serializeJsonPretty(doc, out);
   return out;
@@ -112,6 +114,17 @@ bool restore(const String& json, String& error) {
 
   String key = doc["deviceKey"] | "";
   if (key.length()) settings::saveDeviceKey(key);
+
+  if (JsonArrayConst prompts = doc["prompts"]) {
+    String lines;
+    for (JsonVariantConst p : prompts) {
+      if (!p.is<const char*>()) continue;
+      String s = p.as<String>();
+      s.replace('\n', ' ');
+      lines += s + "\n";
+    }
+    settings::savePrompts(lines);
+  }
   return true;
 }
 

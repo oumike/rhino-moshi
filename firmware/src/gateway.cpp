@@ -202,6 +202,8 @@ bool Gateway::handleAgentStatus() {
     if (err) Serial.printf("[gw] agent status: %s\n", err.c_str());
     if (!card_.endUpdate(ours)) {
       if (!err) card_.clear();  // not ours: keep waiting for the right one
+    } else {
+      statusUpdated_ = true;
     }
   }
   return card_.key() != oldKey || card_.received() != wasReceived;
@@ -235,29 +237,79 @@ Gateway::Answer Gateway::answer(bool approve, const int* choices, String& error)
     error = "Can't answer this from the X4";
     return Answer::Failed;
   }
+  int status = post(path, body, error);
+  if (status == 200 || status == 409) {
+    answeredKey_ = card_.key();
+    changed_ = true;
+  }
+  if (status == 200) return Answer::Sent;
+  if (status == 409) return Answer::Stale;
+  return Answer::Failed;
+}
+
+// Blocking POST to the gateway. Returns the HTTP status, or -1; sets `error`
+// to the gateway's message for anything but 200.
+int Gateway::post(const char* path, const String& body, String& error) {
   unsigned long t0 = millis();
   String resp;
   int status = gatewayRequest(link_, "POST", path, body, resp, 1024);
-  body = String();
   Serial.printf("[gw] POST %s -> %d in %lu ms %s\n", path, status, millis() - t0, resp.c_str());
-  if (status == 200) {
-    answeredKey_ = card_.key();
-    changed_ = true;
-    return Answer::Sent;
-  }
-  if (status == 409) {
-    answeredKey_ = card_.key();
-    changed_ = true;
-    return Answer::Stale;
-  }
+  if (status == 200) return status;
   if (status < 0) {
     error = "No answer from moshi-hook";
+    if (body.length() < 400) Serial.printf("[gw] request body: %s\n", body.c_str());
   } else {
     JsonDocument e;
     error = (!deserializeJson(e, resp) && e["error"].is<const char*>()) ? String((const char*)e["error"])
                                                                          : "HTTP " + String(status);
   }
-  return Answer::Failed;
+  return status;
+}
+
+namespace {
+
+bool terminalRequest(const Agent& a, JsonDocument& doc, String& error) {
+  if (a.session.isEmpty()) {
+    error = "Not an agent session";
+    return false;
+  }
+  doc["source"] = a.kind;
+  doc["sessionId"] = a.session;
+  return true;
+}
+
+}  // namespace
+
+bool Gateway::sendKey(const Agent& a, const char* key, String& error) {
+  JsonDocument doc;
+  if (state_ != LinkState::Online) {
+    error = "Not connected";
+    return false;
+  }
+  if (!terminalRequest(a, doc, error)) return false;
+  doc["keys"][0] = key;
+  String body;
+  serializeJson(doc, body);
+  return post("/v1/keys", body, error) == 200;
+}
+
+bool Gateway::sendPrompt(const Agent& a, const String& text, String& error) {
+  JsonDocument doc;
+  if (state_ != LinkState::Online) {
+    error = "Not connected";
+    return false;
+  }
+  if (!terminalRequest(a, doc, error)) return false;
+  doc["text"] = text;
+  String body;
+  serializeJson(doc, body);
+  return post("/v1/prompt", body, error) == 200;
+}
+
+bool Gateway::takeStatusUpdate() {
+  bool u = statusUpdated_;
+  statusUpdated_ = false;
+  return u;
 }
 
 bool Gateway::poll() {

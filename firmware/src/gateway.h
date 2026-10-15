@@ -59,7 +59,15 @@ class Gateway {
   // Stale (409) means the request changed on the host and nothing was sent.
   Answer answer(bool approve, const int* choices, String& error);
 
+  // Type into agent `a`'s terminal: one key ("Escape", "C-c", "Enter",
+  // "BTab", ...) or a prompt, which is submitted. Never retried.
+  bool sendKey(const Agent& a, const char* key, String& error);
+  bool sendPrompt(const Agent& a, const String& text, String& error);
+  // A frame for the watched agent arrived since the last call.
+  bool takeStatusUpdate();
+
  private:
+  int post(const char* path, const String& body, String& error);
   void attempt();
   void fail(LinkState state, const String& detail, bool retry);
   void disconnect();
@@ -81,4 +89,5 @@ class Gateway {
   unsigned long backoffMs_ = 0;
   unsigned long lastPingAt_ = 0;
   bool changed_ = false;
+  bool statusUpdated_ = false;
 };

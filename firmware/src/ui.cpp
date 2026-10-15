@@ -16,8 +16,64 @@
 namespace ui {
 namespace {
 
-using EpdDisplay = GxEPD2_BW<GxEPD2_426_GDEQ0426T82, GxEPD2_426_GDEQ0426T82::HEIGHT>;
-EpdDisplay display(GxEPD2_426_GDEQ0426T82(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
+// GxEPD2 clocks the frame out a byte at a time, which costs ~170 ms per
+// 48 KB copy and a refresh makes two or three. Whole-screen writes -- the only
+// kind this UI makes -- go out in one burst instead; anything else, and the
+// first write after init, falls through to the library.
+class X4Panel : public GxEPD2_426_GDEQ0426T82 {
+ public:
+  using GxEPD2_426_GDEQ0426T82::GxEPD2_426_GDEQ0426T82;
+  using Base = GxEPD2_426_GDEQ0426T82;
+
+  void writeImage(const uint8_t bitmap[], int16_t x, int16_t y, int16_t w, int16_t h, bool invert = false,
+                  bool mirror_y = false, bool pgm = false) {
+    if (!fast(0x24, bitmap, x, y, w, h, invert, mirror_y, pgm)) Base::writeImage(bitmap, x, y, w, h, invert, mirror_y, pgm);
+  }
+  void writeImageForFullRefresh(const uint8_t bitmap[], int16_t x, int16_t y, int16_t w, int16_t h,
+                                bool invert = false, bool mirror_y = false, bool pgm = false) {
+    if (fast(0x26, bitmap, x, y, w, h, invert, mirror_y, pgm)) fast(0x24, bitmap, x, y, w, h, invert, mirror_y, pgm);
+    else Base::writeImageForFullRefresh(bitmap, x, y, w, h, invert, mirror_y, pgm);
+  }
+  void writeImageAgain(const uint8_t bitmap[], int16_t x, int16_t y, int16_t w, int16_t h, bool invert = false,
+                       bool mirror_y = false, bool pgm = false) {
+    if (fast(0x26, bitmap, x, y, w, h, invert, mirror_y, pgm)) fast(0x24, bitmap, x, y, w, h, invert, mirror_y, pgm);
+    else Base::writeImageAgain(bitmap, x, y, w, h, invert, mirror_y, pgm);
+  }
+
+ private:
+  bool fast(uint8_t ram, const uint8_t* bitmap, int16_t x, int16_t y, int16_t w, int16_t h, bool invert,
+            bool mirror_y, bool pgm) {
+    if (x || y || w != WIDTH || h != HEIGHT || invert || mirror_y || pgm || !_init_display_done || _initial_write)
+      return false;
+    // The whole RAM, as the driver's _setPartialRamArea(0, 0, WIDTH, HEIGHT) sets it: y counts down.
+    _writeCommand(0x11);
+    _writeData(0x01);
+    _writeCommand(0x44);
+    _writeData(0);
+    _writeData(0);
+    _writeData((WIDTH - 1) % 256);
+    _writeData((WIDTH - 1) / 256);
+    _writeCommand(0x45);
+    _writeData((HEIGHT - 1) % 256);
+    _writeData((HEIGHT - 1) / 256);
+    _writeData(0);
+    _writeData(0);
+    _writeCommand(0x4e);
+    _writeData(0);
+    _writeData(0);
+    _writeCommand(0x4f);
+    _writeData((HEIGHT - 1) % 256);
+    _writeData((HEIGHT - 1) / 256);
+    _writeCommand(ram);
+    _startTransfer();
+    _pSPIx->writeBytes(bitmap, uint32_t(WIDTH) * HEIGHT / 8);
+    _endTransfer();
+    return true;
+  }
+};
+
+using EpdDisplay = GxEPD2_BW<X4Panel, X4Panel::HEIGHT>;
+EpdDisplay display(X4Panel(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
 const GFXfont* F_TITLE = &FreeSansBold18pt7b;
 const GFXfont* F_BOLD = &FreeSansBold12pt7b;
@@ -41,9 +97,13 @@ const unsigned long NOTICE_MS = 4000;
 const unsigned long ROTATE_MS = 10000;
 const int OPTION_H = 44;       // option row without a description
 const int OPTION_DESC_H = 66;  // with one
+// While an agent works its status line ticks every second; redraw for that
+// no more often than this.
+const unsigned long ACTIVITY_MS = 10000;
+const unsigned long HOLD_MS = 700;  // Back held this long cancels the keyboard
 
-enum class View { None, Message, Status, List, Detail, Card };
-enum class Screen { List, Detail, Card };
+enum class View { None, Message, Status, List, Detail, Card, Keys, Prompts, Keyboard };
+enum class Screen { List, Detail, Card, Keys, Prompts, Keyboard };
 
 uint8_t rotation = DEFAULT_ROTATION;
 int partials = 0;
@@ -54,6 +114,7 @@ Screen screen = Screen::List;
 String selectedId;
 int cursor = 0;
 bool pending = false;  // gateway changes not drawn yet
+bool redrawNow = false;  // a send finished: show its result
 unsigned long lastDrawAt = 0;
 long lastMinute = -1;
 
@@ -69,7 +130,48 @@ int choices[Card::MAX_QUESTIONS];
 int scroll = 0;           // first text line shown (message or plan)
 bool scrollMore = false;  // the last textArea() had more lines below
 int pageLines = 1;        // lines the last textArea() showed
-enum class Send { None, Approve, Deny, Choice } sendAfterDraw = Send::None;
+enum class Send { None, Approve, Deny, Choice, Key, Prompt } sendAfterDraw = Send::None;
+
+// Keys and Prompts menus, and the keyboard.
+struct KeyItem {
+  const char* label;
+  const char* key;  // gateway key name
+  const char* hint;
+};
+const KeyItem KEYS[] = {
+    {"Esc", "Escape", "Stop, or back out of a dialog"},
+    {"Ctrl-C", "C-c", "Interrupt"},
+    {"Enter", "Enter", ""},
+    {"Shift-Tab", "BTab", "Next mode (Claude: plan, auto, ...)"},
+    {"Tab", "Tab", ""},
+    {"Up", "Up", ""},
+    {"Down", "Down", ""},
+};
+const int KEY_COUNT = sizeof(KEYS) / sizeof(KEYS[0]);
+int menuSel = 0;
+std::vector<String> canned;  // the Prompts menu, below "Type a prompt..."
+const char* sendKeyName = "";
+String sendLabel;  // key label, for the notice
+String sendText;   // prompt being sent
+
+const int KB_UNITS = 10;  // keys per row; the bottom row's keys span several
+const int KB_ROWS = 5;
+const int KB_KEY_H = 56;
+const char* const KB_LETTERS[4] = {"1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm,.?"};
+const char* const KB_SYMBOLS[4] = {"1234567890", "!@#$%^&*()", "-_=+/\\:;\"`", "[]{}<>|~'?"};
+struct WideKey {
+  const char* label;
+  int from, to;  // units
+};
+enum { KB_SHIFT, KB_SYM, KB_SPACE, KB_SEND };
+const WideKey KB_BOTTOM[4] = {{"Shift", 0, 2}, {"#+=", 2, 4}, {"space", 4, 7}, {"Send", 7, 10}};
+String draft;
+int kbRow = 1, kbX = 0;  // kbX: unit under the selection, kept across rows
+bool kbShift = false, kbSym = false, backHoldFired = false;
+
+// What the agent page last drew from the live status, to redraw on change.
+String drawnInfo, drawnActivity;
+bool statusDirty = false;
 
 // Which blocked agent the list-mode watch is on; see ROTATE_MS.
 size_t rotate = 0;
@@ -205,10 +307,18 @@ int paragraph(int y, const String& s, const GFXfont* font, int maxLines, int lin
   return y;
 }
 
+Buttons* capture = nullptr;  // read through the panel's busy wait (see Buttons::beginCapture)
+
+void busyPoll(const void*) {
+  if (capture) capture->update();
+  delay(1);
+}
+
 template <typename F>
 void paint(bool full, F body) {
+  unsigned long t0 = millis();
   display.setRotation(rotation);
-  if (full || partials >= FULL_EVERY) {
+  if (full) {
     display.setFullWindow();
     partials = 0;
   } else {
@@ -220,6 +330,7 @@ void paint(bool full, F body) {
     display.fillScreen(GxEPD_WHITE);
     body();
   } while (display.nextPage());
+  Serial.printf("[ui] %s refresh %lu ms\n", full ? "full" : "partial", millis() - t0);
 }
 
 String age(double since, bool approx) {
@@ -419,15 +530,13 @@ int textArea(int top, int bottom, const String& s, const GFXfont* font, int line
   return y - lineH * 3 / 4;
 }
 
-int optionHeight(const Card& c, size_t q) {
-  for (size_t i = 0; i < c.optionCount(q); i++)
-    if (*c.optionDescription(q, i)) return OPTION_DESC_H;
-  return OPTION_H;
-}
-
-// Numbered option rows from `top`, scrolled to keep `sel` (or -1) in view.
-void optionRows(const Card& c, size_t q, int sel, int top, int bottom) {
-  int n = c.optionCount(q), rowH = optionHeight(c, q);
+// Selectable rows from `top`, scrolled to keep `sel` (or -1) in view. A row
+// with a hint is taller; all rows share one height.
+void menuRows(const std::vector<String>& labels, const std::vector<String>& hints, int sel, int top, int bottom) {
+  int n = labels.size();
+  bool anyHint = false;
+  for (const String& h : hints) anyHint |= h.length() > 0;
+  int rowH = anyHint ? OPTION_DESC_H : OPTION_H;
   int rows = max(1, (bottom - top) / rowH);
   int first = sel >= rows ? sel - rows + 1 : 0;
   for (int r = 0; r < rows && first + r < n; r++) {
@@ -437,17 +546,26 @@ void optionRows(const Card& c, size_t q, int sel, int top, int bottom) {
     if (on) display.fillRect(0, y, W(), rowH - 4, GxEPD_BLACK);
     else display.drawRect(MARGIN / 2, y, W() - MARGIN, rowH - 4, GxEPD_BLACK);
     display.setFont(F_BOLD);
-    text(MARGIN, y + 29, fit(String(i + 1) + ". " + ascii(c.optionLabel(q, i)), W() - 2 * MARGIN), F_BOLD, fg);
-    const char* d = c.optionDescription(q, i);
-    if (*d) {
+    text(MARGIN, y + 29, fit(labels[i], W() - 2 * MARGIN), F_BOLD, fg);
+    if (i < (int)hints.size() && hints[i].length()) {
       display.setFont(F_SMALL);
-      text(MARGIN + 26, y + 54, fit(ascii(d), W() - 2 * MARGIN - 26), F_SMALL, fg);
+      text(MARGIN + 26, y + 54, fit(hints[i], W() - 2 * MARGIN - 26), F_SMALL, fg);
     }
   }
   if (first + rows < n) {
     display.setFont(F_SMALL);
     text(W() - MARGIN - textWidth("more..."), top + rows * rowH + 12, "more...", F_SMALL);
   }
+}
+
+// Numbered option rows for a card's question `q`.
+void optionRows(const Card& c, size_t q, int sel, int top, int bottom) {
+  std::vector<String> labels, hints;
+  for (size_t i = 0; i < c.optionCount(q); i++) {
+    labels.push_back(String(i + 1) + ". " + ascii(c.optionLabel(q, i)));
+    hints.push_back(ascii(c.optionDescription(q, i)));
+  }
+  menuRows(labels, hints, sel, top, bottom);
 }
 
 // Why the X4 can't answer, above the footer.
@@ -543,6 +661,31 @@ void drawCard(Gateway& gw, Agents& agents) {
   }
 }
 
+bool hasSession(const Agent& a) { return a.session.length() > 0; }
+
+// The watched agent's live status line ("Thinking... (12s)"), if any.
+String activityText(Gateway& gw, const Agent& a) {
+  if (gw.watchedId() != a.id || !gw.card().received()) return "";
+  String s;
+  for (JsonVariantConst line : gw.card().activity()) {
+    if (s.length()) s += ' ';
+    s += line | "";
+  }
+  s = ascii(s);
+  s.trim();
+  return s;
+}
+
+// "opus-5-5 - 95% context left"
+String infoText(Gateway& gw, const Agent& a) {
+  if (gw.watchedId() != a.id || !gw.card().received()) return "";
+  const Card& c = gw.card();
+  String s = ascii(c.modelName());
+  int ctx = c.contextRemaining();
+  if (ctx >= 0) s += String(s.length() ? " - " : "") + String(ctx) + "% context left";
+  return s;
+}
+
 void drawDetail(Gateway& gw, Agents& agents) {
   header(gw, agents);
   int i = agents.indexOf(selectedId);
@@ -557,13 +700,110 @@ void drawDetail(Gateway& gw, Agents& agents) {
   y += 48;
   icon(a, MARGIN + 12, y - 8, GxEPD_BLACK, GxEPD_WHITE);
   text(MARGIN + 36, y, stateLine(a), F_BOLD);
-  y += 50;
+  y += 40;
+
+  drawnInfo = infoText(gw, a);
+  drawnActivity = activityText(gw, a);
+  if (drawnInfo.length()) {
+    display.setFont(F_TEXT);
+    text(MARGIN, y, fit(drawnInfo, W() - 2 * MARGIN), F_TEXT);
+    y += 36;
+  }
+  if (drawnActivity.length()) y = paragraph(y, "> " + drawnActivity, F_TEXT, 2, 30) + 6;
+  y += 10;
+
   if (a.title.length()) y = paragraph(y, a.title, F_TEXT, 6, 30) + 20;
   if (a.cwd.length()) {
     text(MARGIN, y, "Folder", F_SMALL);
     paragraph(y + 24, a.cwd, F_SMALL, 3, 22);
   }
-  footer("Back", gw.cardPending() && gw.watchedId() == a.id ? "Answer" : "", "", "");
+  bool s = hasSession(a);
+  footer("Back", gw.cardPending() && gw.watchedId() == a.id ? "Answer" : "", s ? "Keys" : "", s ? "Prompt" : "");
+}
+
+void drawKeys(Gateway& gw, Agents& agents) {
+  int ai = agents.indexOf(selectedId);
+  if (ai < 0) return;
+  int top = cardHead(gw, agents, agents[ai]);
+  text(MARGIN, top + 24, "Send a key", F_BOLD);
+  std::vector<String> labels, hints;
+  for (const KeyItem& k : KEYS) {
+    labels.push_back(k.label);
+    hints.push_back(k.hint);
+  }
+  menuRows(labels, hints, menuSel, top + 40, H() - FOOTER_H - 20);
+  footer("Back", "Send", "", "");
+}
+
+void drawPrompts(Gateway& gw, Agents& agents) {
+  int ai = agents.indexOf(selectedId);
+  if (ai < 0) return;
+  int top = cardHead(gw, agents, agents[ai]);
+  text(MARGIN, top + 24, "Send a prompt", F_BOLD);
+  std::vector<String> labels = {"Type a prompt..."};
+  for (const String& p : canned) labels.push_back(ascii(p));
+  menuRows(labels, {}, menuSel, top + 40, H() - FOOTER_H - 20);
+  footer("Back", menuSel ? "Send" : "Type", "", menuSel ? "Edit" : "");
+}
+
+int kbBottomKey(int x) {
+  for (int k = 0; k < 4; k++)
+    if (x >= KB_BOTTOM[k].from && x < KB_BOTTOM[k].to) return k;
+  return 0;
+}
+
+char kbChar(int row, int x) {
+  char c = (kbSym ? KB_SYMBOLS : KB_LETTERS)[row][x];
+  return kbShift && c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c;
+}
+
+void drawKeyboard(Gateway& gw, Agents& agents) {
+  int ai = agents.indexOf(selectedId);
+  if (ai < 0) return;
+  int top = cardHead(gw, agents, agents[ai]);
+  int unit = W() / KB_UNITS;
+  int left = (W() - unit * KB_UNITS) / 2;
+  int kbTop = H() - FOOTER_H - KB_ROWS * KB_KEY_H - 8;
+  int boxBottom = kbTop - 34;
+
+  // The draft, scrolled to its end, with a cursor.
+  display.drawRect(MARGIN / 2, top, W() - MARGIN, boxBottom - top, GxEPD_BLACK);
+  display.setFont(F_TEXT);
+  int lineH = 30, visible = max(1, (boxBottom - top - 12) / lineH);
+  std::vector<String> lines = wrap(ascii(draft) + "_", W() - 2 * MARGIN - 8, 1000);
+  int first = max(0, (int)lines.size() - visible);
+  int y = top + 30;
+  for (int i = first; i < (int)lines.size(); i++, y += lineH) text(MARGIN + 4, y, lines[i], F_TEXT);
+  display.setFont(F_SMALL);
+  text(MARGIN, boxBottom + 22, "Hold Back to cancel", F_SMALL);
+  String count = String(draft.length()) + "/" + String(settings::MAX_PROMPT_LEN);
+  text(W() - MARGIN - textWidth(count), boxBottom + 22, count, F_SMALL);
+
+  for (int r = 0; r < KB_ROWS; r++) {
+    int ky = kbTop + r * KB_KEY_H;
+    int keys = r < 4 ? KB_UNITS : 4;
+    for (int k = 0; k < keys; k++) {
+      int from = r < 4 ? k : KB_BOTTOM[k].from, to = r < 4 ? k + 1 : KB_BOTTOM[k].to;
+      bool on = r == kbRow && (r < 4 ? k == kbX : k == kbBottomKey(kbX));
+      bool latched = r == 4 && ((k == KB_SHIFT && kbShift) || (k == KB_SYM && kbSym));
+      int kx = left + from * unit + 2, kw = (to - from) * unit - 4, kh = KB_KEY_H - 4;
+      uint16_t fg = on ? GxEPD_WHITE : GxEPD_BLACK;
+      if (on) display.fillRect(kx, ky, kw, kh, GxEPD_BLACK);
+      else display.drawRect(kx, ky, kw, kh, GxEPD_BLACK);
+      if (latched) display.drawRect(kx + 3, ky + 3, kw - 6, kh - 6, fg);
+      String label = r < 4 ? String(kbChar(r, k)) : String(k == KB_SYM && kbSym ? "abc" : KB_BOTTOM[k].label);
+      const GFXfont* font = r < 4 ? F_BOLD : F_TEXT;
+      display.setFont(font);
+      text(kx + (kw - textWidth(label)) / 2, ky + kh / 2 + 8, label, font, fg);
+    }
+  }
+
+  const char* confirm = "Type";
+  if (kbRow == 4) {
+    int k = kbBottomKey(kbX);
+    confirm = k == KB_SHIFT ? "Shift" : k == KB_SYM ? (kbSym ? "Letters" : "Symbols") : k == KB_SPACE ? "Space" : "Send";
+  }
+  footer("Del", confirm, "<", ">");
 }
 
 struct StatusText {
@@ -793,6 +1033,149 @@ void steerWatch(Gateway& gw, Agents& agents) {
   }
 }
 
+// Sends the key or prompt chosen, after the "Sending" notice is drawn.
+void sendTerminal(Gateway& gw, Agents& agents, Send what) {
+  int i = agents.indexOf(selectedId);
+  if (i < 0) {
+    showNotice("Not sent: the tab closed");
+    return;
+  }
+  String err;
+  if (what == Send::Key) {
+    showNotice(gw.sendKey(agents[i], sendKeyName, err) ? "Sent " + sendLabel : "Not sent: " + err);
+    return;
+  }
+  if (gw.sendPrompt(agents[i], sendText, err)) {
+    showNotice("Prompt sent");
+    draft = "";
+    screen = Screen::Detail;
+  } else {
+    showNotice("Not sent: " + err);  // a typed draft stays on the keyboard
+  }
+}
+
+void openKeyboard(const String& text) {
+  draft = text.substring(0, settings::MAX_PROMPT_LEN);
+  kbRow = 1;
+  kbX = 0;
+  kbShift = kbSym = backHoldFired = false;
+  screen = Screen::Keyboard;
+}
+
+bool menuMove(Buttons& b, int count) {
+  if (b.wasPressed(BTN_DOWN)) menuSel = min(menuSel + 1, count - 1);
+  else if (b.wasPressed(BTN_UP)) menuSel = max(menuSel - 1, 0);
+  else return false;
+  return true;
+}
+
+bool keysInput(Buttons& b) {
+  if (b.wasPressed(BTN_BACK)) {
+    screen = Screen::Detail;
+    return true;
+  }
+  if (menuMove(b, KEY_COUNT)) return true;
+  if (!b.wasPressed(BTN_CONFIRM)) return false;
+  sendKeyName = KEYS[menuSel].key;
+  sendLabel = KEYS[menuSel].label;
+  sendAfterDraw = Send::Key;
+  showNotice("Sending " + sendLabel + "...");
+  return true;
+}
+
+bool promptsInput(Buttons& b) {
+  if (b.wasPressed(BTN_BACK)) {
+    screen = Screen::Detail;
+    return true;
+  }
+  if (menuMove(b, canned.size() + 1)) return true;
+  if (b.wasPressed(BTN_RIGHT) && menuSel > 0) {
+    openKeyboard(canned[menuSel - 1]);
+    return true;
+  }
+  if (!b.wasPressed(BTN_CONFIRM)) return false;
+  if (menuSel == 0) {
+    openKeyboard("");
+    return true;
+  }
+  sendText = canned[menuSel - 1];
+  sendAfterDraw = Send::Prompt;
+  showNotice("Sending: " + sendText);
+  return true;
+}
+
+// Drops the last character, whole (a canned prompt may hold UTF-8).
+void deleteLast(String& s) {
+  int n = s.length();
+  while (n > 0 && ((uint8_t)s[n - 1] & 0xC0) == 0x80) n--;
+  s.remove(max(0, n - 1));
+}
+
+bool keyboardInput(Buttons& b) {
+  // Back acts on release: a tap deletes, a hold cancels.
+  if (b.isPressed(BTN_BACK) && !backHoldFired && b.heldTime() >= HOLD_MS) {
+    backHoldFired = true;
+    draft = "";
+    screen = Screen::Prompts;
+    return true;
+  }
+  if (b.wasReleased(BTN_BACK)) {
+    if (backHoldFired) {
+      backHoldFired = false;
+      return false;
+    }
+    // A replayed hold only shows its length on release.
+    if (draft.isEmpty() || b.heldTime() >= HOLD_MS) {
+      if (b.heldTime() >= HOLD_MS) draft = "";
+      screen = Screen::Prompts;
+    } else {
+      deleteLast(draft);
+    }
+    return true;
+  }
+  if (b.wasPressed(BTN_UP)) kbRow = (kbRow + KB_ROWS - 1) % KB_ROWS;
+  else if (b.wasPressed(BTN_DOWN)) kbRow = (kbRow + 1) % KB_ROWS;
+  else if (b.wasPressed(BTN_LEFT) || b.wasPressed(BTN_RIGHT)) {
+    int step = b.wasPressed(BTN_RIGHT) ? 1 : -1;
+    if (kbRow < 4) kbX = (kbX + step + KB_UNITS) % KB_UNITS;
+    else kbX = KB_BOTTOM[(kbBottomKey(kbX) + step + 4) % 4].from;
+  } else if (b.wasPressed(BTN_CONFIRM)) {
+    char c = 0;
+    if (kbRow < 4) {
+      c = kbChar(kbRow, kbX);
+    } else {
+      switch (kbBottomKey(kbX)) {
+        case KB_SHIFT: kbShift = !kbShift; break;
+        case KB_SYM: kbSym = !kbSym; break;
+        case KB_SPACE: c = ' '; break;
+        case KB_SEND: {
+          String t = draft;
+          t.trim();
+          if (t.isEmpty()) {
+            showNotice("Nothing to send");
+            break;
+          }
+          sendText = t;
+          sendAfterDraw = Send::Prompt;
+          showNotice("Sending prompt...");
+          break;
+        }
+      }
+    }
+    if (c) {
+      if (draft.length() >= settings::MAX_PROMPT_LEN) {
+        showNotice("Prompt is full");
+      } else {
+        draft += c;
+        if (c != ' ') kbShift = false;
+      }
+    }
+  } else {
+    return false;
+  }
+  return true;
+}
+
 // Returns true if the input changed what is on screen.
 bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
   switch (view) {
@@ -816,17 +1199,30 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
       } else return false;
       return true;
     }
-    case View::Detail:
+    case View::Detail: {
+      int i = agents.indexOf(selectedId);
+      bool session = i >= 0 && hasSession(agents[i]);
       if (b.wasPressed(BTN_BACK)) screen = Screen::List;
       else if (b.wasPressed(BTN_DOWN)) moveCursor(agents, 1);
       else if (b.wasPressed(BTN_UP)) moveCursor(agents, -1);
       else if (b.wasPressed(BTN_CONFIRM) && gw.cardPending() && gw.watchedId() == selectedId) {
         agents.setDismissed(selectedId, false);
         openCard(Screen::Detail);
+      } else if (b.wasPressed(BTN_LEFT) && session) {
+        menuSel = 0;
+        screen = Screen::Keys;
+      } else if (b.wasPressed(BTN_RIGHT) && session) {
+        menuSel = 0;
+        canned = settings::prompts();
+        screen = Screen::Prompts;
       } else return false;
       agents.markSeen(selectedId);
       return true;
+    }
     case View::Card: return cardInput(gw, agents, b);
+    case View::Keys: return keysInput(b);
+    case View::Prompts: return promptsInput(b);
+    case View::Keyboard: return keyboardInput(b);
     default: return false;
   }
 }
@@ -836,7 +1232,9 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
 void begin() {
   rotation = settings::rotation();
   SPI.begin(EPD_SCLK, SPI_MISO, EPD_MOSI, EPD_CS);
-  display.init(0);
+  // The library's default is 4 MHz; the SSD1677 takes writes at up to 20.
+  display.init(0, true, 10, false, SPI, SPISettings(20000000, MSBFIRST, SPI_MODE0));
+  display.epd2.setBusyCallback(busyPoll);
 }
 
 void message(const String& title, const String& body) {
@@ -870,6 +1268,9 @@ View viewFor(LinkState st, Agents& agents) {
   switch (screen) {
     case Screen::Detail: return View::Detail;
     case Screen::Card: return View::Card;
+    case Screen::Keys: return View::Keys;
+    case Screen::Prompts: return View::Prompts;
+    case Screen::Keyboard: return View::Keyboard;
     default: return View::List;
   }
 }
@@ -897,22 +1298,62 @@ void update(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
   View view = viewFor(gw.state(), agents);
   if (view == View::Detail) changed |= agents.markSeen(selectedId);
 
+  View before = view;
   bool dirty = handleInput(view, gw, agents, buttons);
   if (dirty) view = viewFor(gw.state(), agents);  // input may have switched screens
+  if (view != before) buttons.clearQueue();
+  // Presses made during the last refresh, in order, before drawing again --
+  // so a burst of moves costs one refresh. Only while they still apply: not
+  // once the screen has changed under them, nor on a decision card.
+  while (buttons.queued()) {
+    if (view == View::Card || sendAfterDraw != Send::None) {
+      buttons.clearQueue();
+      break;
+    }
+    buttons.replay();
+    dirty |= handleInput(view, gw, agents, buttons);
+    View next = viewFor(gw.state(), agents);
+    if (next != view) {
+      buttons.clearQueue();
+      view = next;
+    }
+  }
   pending |= changed;
   unsigned long now = millis();
-  if (pending && now - lastDrawAt >= MIN_REDRAW_MS) dirty = true;
+  // A redraw drops presses made during it, so don't redraw for the gateway
+  // while typing.
+  bool typing = view == View::Keyboard;
+  if (pending && !typing && now - lastDrawAt >= MIN_REDRAW_MS) dirty = true;
+  if (redrawNow) dirty = true;
   if (notice.length() && !noticeShown()) {
     notice = "";
     dirty = true;
   }
 
+  statusDirty |= gw.takeStatusUpdate();
+  if (statusDirty && view == View::Detail) {
+    int i = agents.indexOf(selectedId);
+    String info = i >= 0 ? infoText(gw, agents[i]) : String();
+    String act = i >= 0 ? activityText(gw, agents[i]) : String();
+    if (info != drawnInfo || act.isEmpty() != drawnActivity.isEmpty()) dirty = true;
+    else if (act == drawnActivity) statusDirty = false;
+    else if (now - lastDrawAt >= ACTIVITY_MS) dirty = true;  // only the ticking status line changed
+  }
+
   time_t t = time(nullptr);
   long minute = t > 1700000000 ? t / 60 : -1;
-  if (minute != lastMinute && view != View::Status) dirty = true;
+  if (minute != lastMinute && view != View::Status && !typing) dirty = true;
 
-  bool full = view != lastView;
-  if (!dirty && !full) return;
+  bool changedView = view != lastView;
+  if (!dirty && !changedView) return;
+
+  // Moving between screens is a partial refresh too; a full one (2.4 s and a
+  // flash) is for leaving a message screen and for clearing the ghosting
+  // partials leave -- done on a screen change where possible, never mid-typing.
+  bool full = lastView == View::None || lastView == View::Message || lastView == View::Status ||
+              view == View::Status;
+  if (partials >= FULL_EVERY && changedView) full = true;
+  if (partials >= 2 * FULL_EVERY && !typing) full = true;
 
   auto draw = [&](void (*body)(Gateway&, Agents&)) {
     paint(full, [&] {
@@ -920,25 +1361,40 @@ void update(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
       drawNotice();
     });
   };
+  capture = &buttons;
+  buttons.beginCapture();
   switch (view) {
     case View::List: draw(drawList); break;
     case View::Detail: draw(drawDetail); break;
     case View::Card: draw(drawCard); break;
+    case View::Keys: draw(drawKeys); break;
+    case View::Prompts: draw(drawPrompts); break;
+    case View::Keyboard: draw(drawKeyboard); break;
     default: draw(drawStatus); break;
   }
   lastView = view;
   lastMinute = minute;
   lastDrawAt = millis();
   pending = false;
+  if (view == View::Detail) statusDirty = false;
+
+  capture = nullptr;
+  // Keep what was pressed during the refresh only if it was pressed at this
+  // same screen (see the replay above).
+  buttons.endCapture(!changedView && view != View::Card && sendAfterDraw == Send::None);
 
   if (sendAfterDraw != Send::None) {
     Send what = sendAfterDraw;
     sendAfterDraw = Send::None;
-    sendAnswer(gw, what);
+    if (what == Send::Key || what == Send::Prompt) sendTerminal(gw, agents, what);
+    else sendAnswer(gw, what);
     pending = true;
+    redrawNow = true;
     lastDrawAt = 0;
+    buttons.resync();  // the request blocked the loop
+  } else {
+    redrawNow = false;
   }
-  buttons.resync();
 }
 
 }  // namespace ui
