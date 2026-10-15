@@ -9,11 +9,11 @@
 
 namespace backup {
 
-const char* SD_PATH = "/moshi/rhino-x4-backup.json";
+const char* SD_PATH = "/moshi/rhino-moshi-backup.json";
 
 namespace {
 
-const char* FORMAT = "rhino-x4-backup";
+const char* FORMAT = "rhino-moshi-backup";
 const int VERSION = 1;
 const size_t MAX_SIZE = 16384;
 
@@ -95,7 +95,7 @@ bool restore(const String& json, String& error) {
     return false;
   }
   if (doc["format"] != FORMAT) {
-    error = "File is not a Rhino X4 backup.";
+    error = "File is not a Rhino Moshi backup.";
     return false;
   }
   if ((doc["version"] | 0) > VERSION) {

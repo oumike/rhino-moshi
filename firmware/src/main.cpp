@@ -1,4 +1,4 @@
-// Rhino Companion for the Xteink X4 and ThinkNode M9: a client for moshi-hook's gateway,
+// Rhino Moshi for the Xteink X4 and ThinkNode M9: a client for moshi-hook's gateway,
 // reached over an SSH tunnel. See README.md.
 
 #include <Arduino.h>

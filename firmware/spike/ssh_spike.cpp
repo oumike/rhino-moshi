@@ -6,7 +6,7 @@
 //
 // First boot generates an ed25519 key and starts setup mode: an open access
 // point (no captive redirect) serving the settings page
-// at http://192.168.4.1. Afterwards the page is at http://rhino-x4.local. Hold
+// at http://192.168.4.1. Afterwards the page is at http://rhino-moshi-x4.local. Hold
 // Back while booting to return to setup mode. The host key is trusted on
 // first use and pinned in NVS.
 
@@ -83,7 +83,7 @@ static String authorizedKeysLine(ssh_key key) {
   if (ssh_pki_export_pubkey_base64(key, &pub) != SSH_OK) fail("export pubkey");
   char line[256];
   snprintf(line, sizeof(line),
-           "restrict,port-forwarding,permitopen=\"%s:%d\",command=\"false\" ssh-ed25519 %s rhino-x4", GATEWAY_HOST,
+           "restrict,port-forwarding,permitopen=\"%s:%d\",command=\"false\" ssh-ed25519 %s rhino-moshi-x4", GATEWAY_HOST,
            GATEWAY_PORT, pub);
   ssh_string_free_char(pub);
   return line;
@@ -252,7 +252,7 @@ static void watchEvents(ssh_session s) {
 void setup() {
   Serial.begin(115200);
   delay(1500);
-  Serial.println("\n== Rhino X4 SSH spike ==");
+  Serial.println("\n== Rhino Moshi SSH spike ==");
   heap("boot");
 
   SPI.begin(EPD_SCLK, SPI_MISO, EPD_MOSI, EPD_CS);

@@ -1,4 +1,4 @@
-# Rhino Companion — Moshi client for the Xteink X4
+# Rhino Moshi — Moshi client for the Xteink X4
 
 > **Status: in development.** This branch is a fresh start. Only the X4 board
 > definition, the button driver and the flashing tool carry over from `main`.
@@ -37,7 +37,7 @@ opens a tunnel (an SSH `direct-tcpip` channel, the same thing `ssh -W` does) to
    append it to `~/.ssh/authorized_keys` on each host:
 
    ```
-   restrict,port-forwarding,permitopen="127.0.0.1:24543",command="false" ssh-ed25519 AAAA… rhino-x4-3fa2
+   restrict,port-forwarding,permitopen="127.0.0.1:24543",command="false" ssh-ed25519 AAAA… rhino-moshi-x4-3fa2
    ```
 
    The options limit this key to exactly one thing: a tunnel to the moshi-hook
@@ -154,7 +154,7 @@ from `main`. It adds:
   interface, so it runs over an SSH channel instead of a `WiFiClient`.
   (Alternative: a loopback listener on the X4 that relays to the channel, so
   stock libraries work unchanged. The spike decides.)
-- **Settings page:** a plain web page at `http://rhino-x4.local` on the LAN.
+- **Settings page:** a plain web page at `http://rhino-moshi-x4.local` on the LAN.
   It handles Wi-Fi credentials, shows the `authorized_keys` line, takes up to
   four host entries (name, address, port, user) and which one to connect to,
   shows and forgets each host's pinned key,
@@ -162,12 +162,12 @@ from `main`. It adds:
   line, up to 20 of 300 characters), and sets an optional page password
   (HTTP Basic auth, user `admin`; none by default).
 - **Setup mode:** with no saved Wi-Fi (fresh install), or with Back held at
-  boot, the X4 runs an open access point `Rhino-X4-Setup` and serves the same
+  boot, the X4 runs an open access point `Rhino-Moshi-X4-Setup` and serves the same
   page at `http://192.168.4.1`. There is no captive portal: join and browse
   there yourself. Saving restarts the X4 onto the saved network.
 - **Backup/restore:** the settings page downloads and restores a JSON backup
   in the browser, and writes or reads one on the SD card at
-  `/moshi/rhino-x4-backup.json`. A backup holds every setting (all hosts in
+  `/moshi/rhino-moshi-backup.json`. A backup holds every setting (all hosts in
   `hosts`, plus the active one in `host` for older firmware), including the
   Wi-Fi and page passwords and the X4's SSH private key, so a restored X4
   needs no re-authorizing on hosts. The file must be kept private.
@@ -327,4 +327,4 @@ keyboard's register and key codes (the firmware logs raw codes as `[kb]`).
 - **Finished agents:** re-sorted and marked as unseen, with no pop-up.
 - **Rotation:** on the settings page or Menu → Flip screen. **Button calibration:** none on the
   device; the ladder thresholds in `board.h` are measured on hardware.
-  `docs/flashing.md` must drop the old `rhino-companion` CLI commands.
+  `docs/flashing.md` must drop the old `rhino-moshi` CLI commands.

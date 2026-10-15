@@ -91,7 +91,7 @@ unused. Nothing here depends on the device being 16 MB.
 
 On first boot the device has no credentials and starts a captive portal:
 
-1. The screen shows `Rhino-Companion-Setup`.
+1. The screen shows `Rhino-Moshi-X4-Setup`.
 2. Join that Wi-Fi network from your phone or laptop.
 3. The portal opens automatically; pick your network and enter the password.
 4. The device reboots and shows its IP address.
@@ -109,7 +109,7 @@ defaults to 3, which is right way up on the hardware this was developed on. If
 the screen is upside down for how you hold it:
 
 ```bash
-rhino-companion rotate 1
+rhino-moshi rotate 1
 ```
 
 Rotation is stored in NVS, so it survives reboots but not a flash erase.
@@ -120,7 +120,7 @@ The ADC thresholds in `firmware/include/board.h` came from a known-good X4, but
 resistor tolerances and board revisions shift them. Verify:
 
 ```bash
-rhino-companion calibrate
+rhino-moshi calibrate
 ```
 
 Press each button in turn. You should see the decoded name change. Expected

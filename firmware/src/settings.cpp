@@ -6,7 +6,7 @@
 
 namespace {
 
-const char* NS = "rhino";
+const char* NS = "rhino-moshi";
 
 // Preferences::getString logs an error for a missing key; absent is normal here.
 String str(Preferences& p, const char* key) { return p.isKey(key) ? p.getString(key, "") : String(); }

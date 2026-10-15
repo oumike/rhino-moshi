@@ -42,7 +42,7 @@ String authorizedKeysLine(ssh_key key) {
   char* pub = nullptr;
   if (ssh_pki_export_pubkey_base64(key, &pub) != SSH_OK) return String();
   char line[256];
-  snprintf(line, sizeof(line), "restrict,port-forwarding,permitopen=\"%s:%d\",command=\"false\" ssh-ed25519 %s rhino-" BOARD_SLUG,
+  snprintf(line, sizeof(line), "restrict,port-forwarding,permitopen=\"%s:%d\",command=\"false\" ssh-ed25519 %s rhino-moshi-" BOARD_SLUG,
            GATEWAY_HOST, GATEWAY_PORT, pub);
   ssh_string_free_char(pub);
   return line;

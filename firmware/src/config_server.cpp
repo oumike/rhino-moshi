@@ -10,8 +10,8 @@
 
 namespace config_server {
 
-const char* HOSTNAME = "rhino-" BOARD_SLUG;
-const char* AP_SSID = "Rhino-" BOARD_NAME "-Setup";
+const char* HOSTNAME = "rhino-moshi-" BOARD_SLUG;
+const char* AP_SSID = "Rhino-Moshi-" BOARD_NAME "-Setup";
 
 namespace {
 
@@ -186,7 +186,7 @@ void sendResult(bool ok, const String& message, bool restart) {
 
 void handleBackup() {
   if (!authorized()) return;
-  server.sendHeader("Content-Disposition", "attachment; filename=\"rhino-x4-backup.json\"");
+  server.sendHeader("Content-Disposition", "attachment; filename=\"rhino-moshi-backup.json\"");
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", backup::toJson());
 }

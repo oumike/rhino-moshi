@@ -6,7 +6,7 @@
  * Wi-Fi bring-up plus the settings web page.
  *
  * Normal operation: join the saved network and serve the settings page at
- * http://rhino-x4.local (and the device IP). The page is open unless a page
+ * http://rhino-moshi-x4.local (and the device IP). The page is open unless a page
  * password has been set on it, after which it requires HTTP Basic auth
  * (user "admin").
  *
