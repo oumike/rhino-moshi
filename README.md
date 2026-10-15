@@ -186,7 +186,7 @@ from `main`. It adds:
 │ ✓•docs       claude 2h │   │                        │   │                        │
 │ · scratch    shell     │   │                        │   │                        │
 ├────────────────────────┤   ├────────────────────────┤   ├────────────────────────┤
-│ Menu │ Open │ Prev│Next │   │ Back │ Deny │Approve│  │   │ Back │Answer│Keys│Prompt│
+│ Menu │ Open │     │     │   │ Back │ Deny │Approve│  │   │ Back │Answer│Keys│Prompt│
 └────────────────────────┘   └────────────────────────┘   └────────────────────────┘
 ```
 
