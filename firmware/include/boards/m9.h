@@ -65,6 +65,8 @@ enum KbCode : uint8_t {
   KB_ENTER = 0x0D,
   KB_DEL_7F = 0x7F,
   KB_HOME = 0x82,
+  KB_UNDER_HOME = 0x83,  // button below Home (camillia's DMs): opens Prompt
+  KB_UNDER_BACK = 0x84,  // button below Back (camillia's Tools): opens Keys
   KB_BACK_EARLY = 0x86,  // Back on early controllers; Map held on production
   KB_BACK = 0x87,        // Back on production controllers
   KB_INVALID = 0x88,

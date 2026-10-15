@@ -88,7 +88,7 @@ void Buttons::inject(uint8_t button, unsigned long heldMs) {
     tap(button);
     return;
   }
-  uint8_t bit = 1 << button;
+  uint16_t bit = 1 << button;
   unsigned long now = millis();
   push({0, 0, bit, now, heldMs, 0});
   push({0, bit, 0, now, heldMs, 0});
@@ -96,7 +96,7 @@ void Buttons::inject(uint8_t button, unsigned long heldMs) {
 
 // The controller reports presses only; each is its own release.
 void Buttons::tap(uint8_t button) {
-  uint8_t bit = 1 << button;
+  uint16_t bit = 1 << button;
   push({bit, bit, 0, millis(), 0, 0});
 }
 
@@ -137,6 +137,8 @@ void Buttons::readKeyboard() {
     case KB_UP: tap(BTN_UP); break;
     case KB_DOWN: tap(BTN_DOWN); break;
     case KB_HOME: tap(BTN_HOME); break;
+    case KB_UNDER_HOME: tap(BTN_PROMPT); break;
+    case KB_UNDER_BACK: tap(BTN_KEYS); break;
     default:
       if (code >= 0x20 && code < 0x7F) injectChar((char)code);
       break;

@@ -71,7 +71,7 @@ class Buttons {
 
  private:
   struct Event {
-    uint8_t pressed, released, held;
+    uint16_t pressed, released, held;
     unsigned long at, heldMs;
     char ch;
   };
@@ -85,12 +85,12 @@ class Buttons {
   Event event_ = {};
 
   // Sampling task state.
-  volatile uint8_t stable_ = 0;
-  uint8_t last_ = 0;
+  volatile uint16_t stable_ = 0;
+  uint16_t last_ = 0;
   unsigned long changedAt_ = 0, pressStartedAt_ = 0;
   bool holdSent_ = false;
   volatile bool swapUpDown_ = false;
-  volatile uint8_t injectMask_ = 0;
+  volatile uint16_t injectMask_ = 0;
   volatile unsigned long injectUntil_ = 0, injectFreeAt_ = 0;
 
 #if defined(BOARD_M9)

@@ -148,6 +148,14 @@ bool kbShift = false, kbSym = false, backHoldFired = false;
 // The menu and its screens.
 enum { M_USAGE, M_HOSTS, M_DEVICE, M_FLIP, M_RESTART, M_COUNT };
 const char* const MENU_ITEMS[M_COUNT] = {"Usage", "Hosts", "Device", "Flip screen", "Restart"};
+// The M9's panel has one good orientation, so it drops Flip; every other item
+// is in order. The X4 keeps all of them.
+#if defined(BOARD_M9)
+const int MENU_ORDER[] = {M_USAGE, M_HOSTS, M_DEVICE, M_RESTART};
+#else
+const int MENU_ORDER[] = {M_USAGE, M_HOSTS, M_DEVICE, M_FLIP, M_RESTART};
+#endif
+const int MENU_LEN = sizeof(MENU_ORDER) / sizeof(MENU_ORDER[0]);
 int mainSel = 0;
 int hostSel = 0, hostActive = 0;
 std::vector<HostConfig> hostList;  // read when the menu opens
@@ -784,8 +792,14 @@ void drawDetail(Gateway& gw, Agents& agents) {
     text(MARGIN, y, "Folder", F_SMALL, color::MUTED);
     paragraph(y + S(24), a.cwd, F_SMALL, LAYOUT_COMPACT ? 1 : 3, S(22));
   }
+#if HAS_KEYBOARD
+  // Keys and Prompt have dedicated buttons on the keyboard, so the footer
+  // doesn't spell them out.
+  footer("Back", gw.cardPending() && gw.watchedId() == a.id ? "Answer" : "", "", "");
+#else
   bool s = hasSession(a);
   footer("Back", gw.cardPending() && gw.watchedId() == a.id ? "Answer" : "", s ? "Keys" : "", s ? "Prompt" : "");
+#endif
 }
 
 void drawKeys(Gateway& gw, Agents& agents) {
@@ -971,14 +985,18 @@ void drawMenu(Gateway& gw, Agents& agents) {
   String use = usageSummary(u);
   String host = hostActive < (int)hostList.size() ? ascii(hostList[hostActive].name) : String("None set up");
   if (hostList.size() > 1) host += " - " + String(hostList.size()) + " hosts";
-  std::vector<String> labels(MENU_ITEMS, MENU_ITEMS + M_COUNT);
-  std::vector<String> hints = {
+  String allHints[M_COUNT] = {
       use.length() ? "Most used: " + use : u.received() ? String("No accounts reported") : String("Nothing reported yet"),
       host,
       "Settings page, Wi-Fi, key, battery",
       "Turn the screen upside down",
       "Start the " BOARD_NAME " over",
   };
+  std::vector<String> labels, hints;
+  for (int i = 0; i < MENU_LEN; i++) {
+    labels.push_back(MENU_ITEMS[MENU_ORDER[i]]);
+    hints.push_back(allHints[MENU_ORDER[i]]);
+  }
   menuRows(labels, hints, mainSel, HEADER_H + S(70), H() - FOOTER_H - S(10));
   footer("Back", "Open", "", "");
 }
@@ -1480,9 +1498,9 @@ bool menuInput(Buttons& b) {
     screen = Screen::List;
     return true;
   }
-  if (menuMove(b, M_COUNT, mainSel)) return true;
+  if (menuMove(b, MENU_LEN, mainSel)) return true;
   if (!b.wasPressed(BTN_CONFIRM)) return false;
-  switch (mainSel) {
+  switch (MENU_ORDER[mainSel]) {
     case M_USAGE:
       usageFirst = 0;
       screen = Screen::Usage;
@@ -1543,6 +1561,20 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
   if (b.wasPressed(BTN_HOME) && screen != Screen::List) {
     draft = "";
     screen = Screen::List;
+    return true;
+  }
+  // Dedicated buttons jump straight to an agent's Keys or Prompt screen.
+  if ((b.wasPressed(BTN_PROMPT) || b.wasPressed(BTN_KEYS)) &&
+      (view == View::Detail || view == View::Keys || view == View::Prompts)) {
+    int i = agents.indexOf(selectedId);
+    if (i < 0 || !hasSession(agents[i])) return false;
+    menuSel = 0;
+    if (b.wasPressed(BTN_PROMPT)) {
+      canned = settings::prompts();
+      screen = Screen::Prompts;
+    } else {
+      screen = Screen::Keys;
+    }
     return true;
   }
   // Typing on an agent's screens starts a prompt to it.
