@@ -1,4 +1,4 @@
-// Rhino Companion for the Xteink X4: a client for moshi-hook's gateway,
+// Rhino Companion for the Xteink X4 and ThinkNode M9: a client for moshi-hook's gateway,
 // reached over an SSH tunnel. See README.md.
 
 #include <Arduino.h>
@@ -28,7 +28,8 @@ static void onSetupMode(const char* ssid, const char* url) {
 }
 
 static void onConnecting(const char* ssid) {
-  ui::message("Joining Wi-Fi", String(ssid) + "\n\nHold Back while restarting to change Wi-Fi.");
+  ui::message("Joining Wi-Fi", String(ssid) + "\n\nHold " + (HAS_KEYBOARD ? "a key" : "Back") +
+                                  " while restarting to change Wi-Fi.");
 }
 
 static void halt(const char* why) {
@@ -38,22 +39,27 @@ static void halt(const char* why) {
 }
 
 // Serial debugging: b c l r u d press Back, Confirm, Left, Right, Up, Down;
-// h holds Back; s dumps the screen. Read in a task of its own, so presses land
-// mid-refresh just as real ones do.
+// h holds Back, m is Home; s dumps the screen; text between double quotes is
+// typed. Read in a task of its own, so presses land mid-refresh just as real
+// ones do.
 static volatile bool shotRequested = false;
 static void uiTask(void*);
 
 static void serialTask(void*) {
+  bool quoted = false;
   for (;;) {
     while (!buttons.injecting() && Serial.available()) {
       int c = Serial.read();
-      if (c == 'b') buttons.inject(BTN_BACK);
+      if (c == '"') quoted = !quoted;
+      else if (quoted) buttons.injectChar((char)c);
+      else if (c == 'b') buttons.inject(BTN_BACK);
       else if (c == 'c') buttons.inject(BTN_CONFIRM);
       else if (c == 'l') buttons.inject(BTN_LEFT);
       else if (c == 'r') buttons.inject(BTN_RIGHT);
       else if (c == 'u') buttons.inject(BTN_UP);
       else if (c == 'd') buttons.inject(BTN_DOWN);
       else if (c == 'h') buttons.inject(BTN_BACK, 1000);
+      else if (c == 'm') buttons.inject(BTN_HOME);
       else if (c == 's') shotRequested = true;
     }
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -63,7 +69,7 @@ static void serialTask(void*) {
 void setup() {
   Serial.begin(115200);
   delay(300);
-  Serial.println("\n== Rhino X4 ==");
+  Serial.println("\n== Rhino " BOARD_NAME " ==");
 
   ui::begin();
   buttons.begin();

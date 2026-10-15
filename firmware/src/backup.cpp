@@ -20,7 +20,7 @@ const size_t MAX_SIZE = 16384;
 // The card shares the SPI bus with the panel. Mount only for the duration of
 // one operation so the card can be pulled at any other time.
 bool mountSd(String& error) {
-  SPI.begin(EPD_SCLK, SPI_MISO, EPD_MOSI);  // no-op if the panel already started it
+  SPI.begin(SPI_SCLK, SPI_MISO, SPI_MOSI);  // no-op if the panel already started it
   if (!SD.begin(SD_CS, SPI, 4000000)) {
     error = "No SD card found.";
     return false;

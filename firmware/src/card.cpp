@@ -1,5 +1,7 @@
 #include "card.h"
 
+#include "board.h"
+
 namespace {
 
 // Appends `s` as a JSON string literal.
@@ -102,7 +104,7 @@ const char* Card::optionDescription(size_t q, size_t i) const { return options(q
 bool Card::answerable(String* why) const {
   String reason;
   if (oversized_) {
-    reason = "Too big for the X4 to show. Answer this in the terminal.";
+    reason = "Too big for the " BOARD_NAME " to show. Answer this in the terminal.";
   } else {
     switch (kind()) {
       case Kind::None: reason = "Nothing to answer."; break;

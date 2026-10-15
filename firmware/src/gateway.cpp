@@ -1,5 +1,7 @@
 #include "gateway.h"
 
+#include "board.h"
+
 #include <WiFi.h>
 
 namespace {
@@ -428,7 +430,7 @@ bool Gateway::answer(bool approve, const int* choices, String& error) {
   String body;
   const char* path = card_.answerRequest(approve, choices, body);
   if (!path) {
-    error = "Can't answer this from the X4";
+    error = "Can't answer this from the " BOARD_NAME;
     return false;
   }
   if (!startRequest(Request::Answer, path, body, error)) return false;

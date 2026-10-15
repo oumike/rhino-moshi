@@ -4,13 +4,14 @@
 #include <WebServer.h>
 #include <WiFi.h>
 
+#include "board.h"
 #include "backup.h"
 #include "settings.h"
 
 namespace config_server {
 
-const char* HOSTNAME = "rhino-x4";
-const char* AP_SSID = "Rhino-X4-Setup";
+const char* HOSTNAME = "rhino-" BOARD_SLUG;
+const char* AP_SSID = "Rhino-" BOARD_NAME "-Setup";
 
 namespace {
 
@@ -48,7 +49,7 @@ bool authorized() {
   String pw = settings::webPassword();
   if (setupMode || pw.isEmpty()) return true;
   if (server.authenticate("admin", pw.c_str())) return true;
-  server.requestAuthentication(BASIC_AUTH, "Rhino X4");
+  server.requestAuthentication(BASIC_AUTH, "Rhino " BOARD_NAME);
   return false;
 }
 
@@ -65,9 +66,9 @@ textarea{font-family:ui-monospace,monospace;font-size:.8em}
 
 void sendPage(const String& body) {
   String html = F("<!doctype html><html><head><meta charset=utf-8>"
-                  "<meta name=viewport content='width=device-width,initial-scale=1'><title>Rhino X4</title>");
+                  "<meta name=viewport content='width=device-width,initial-scale=1'><title>Rhino " BOARD_NAME "</title>");
   html += FPSTR(STYLE);
-  html += F("</head><body><h1>Rhino X4</h1>");
+  html += F("</head><body><h1>Rhino " BOARD_NAME "</h1>");
   html += body;
   html += F("</body></html>");
   server.send(200, "text/html; charset=utf-8", html);
@@ -94,7 +95,7 @@ void handleRoot() {
   b += F("'>");
 
   b += F("<h2>Hosts</h2><p class=hint>Machines running moshi-hook, reached over SSH. Switch between them "
-         "from the X4's menu. Clear an address to remove a host.</p>");
+         "from the " BOARD_NAME "'s menu. Clear an address to remove a host.</p>");
   for (int i = 0; i < (int)settings::MAX_HOSTS; i++) {
     HostConfig h = i < (int)hosts.size() ? hosts[i] : HostConfig();
     String k = "h" + String(i) + "_";
@@ -137,7 +138,7 @@ void handleRoot() {
   b += String("<option value=1") + (rot == 1 ? " selected" : "") + ">Portrait, upside down</option>";
   b += F("</select>");
 
-  b += F("<h2>Prompts</h2><p class=hint>Canned prompts for the X4's Prompt menu, one per line, in order (up to "
+  b += F("<h2>Prompts</h2><p class=hint>Canned prompts for the " BOARD_NAME "'s Prompt menu, one per line, in order (up to "
          "20).</p><textarea name=prompts rows=8 style='font-family:inherit;font-size:1em'>");
   b += esc(settings::promptsText());
   b += F("</textarea>");
@@ -145,15 +146,15 @@ void handleRoot() {
   b += F("<h2>This page</h2><label>Password</label><input name=web_pw type=password autocomplete=new-password "
          "placeholder='");
   b += hasPw ? F("unchanged") : F("none: anyone on the network can open this page");
-  b += F("'><p class=hint>User name is <code>admin</code>. Forgot it? Hold Back while the X4 boots to enter "
+  b += F("'><p class=hint>User name is <code>admin</code>. Forgot it? Hold Back while the " BOARD_NAME " boots to enter "
          "setup mode.</p>");
   if (hasPw) b += F("<label><input type=checkbox name=clear_pw> Remove password</label>");
 
   b += F("<button type=submit>Save and restart</button></form>");
 
   b += F("<h2>Backup</h2><p class=hint>A backup holds every setting above, including the Wi-Fi and page "
-         "passwords and the X4's SSH private key: whoever has the file can reach moshi-hook on your hosts. "
-         "Keep it private. Restoring restarts the X4.</p>"
+         "passwords and the " BOARD_NAME "'s SSH private key: whoever has the file can reach moshi-hook on your hosts. "
+         "Keep it private. Restoring restarts the " BOARD_NAME ".</p>"
          "<form method=get action=/backup><button type=submit>Download backup</button></form>"
          "<form method=post action=/restore enctype=multipart/form-data>"
          "<label>Restore from file</label><input type=file name=backup accept='.json,application/json' required>"
@@ -175,7 +176,7 @@ void sendResult(bool ok, const String& message, bool restart) {
     b += HOSTNAME;
     b += F(".local/'>http://");
     b += HOSTNAME;
-    b += F(".local</a> once the X4 rejoins Wi-Fi.</p>");
+    b += F(".local</a> once the " BOARD_NAME " rejoins Wi-Fi.</p>");
     restartAt = millis() + 1500;
   } else {
     b += F("<p><a href='/'>Back to settings</a></p>");
@@ -286,7 +287,7 @@ void handleSave() {
                 (unsigned)hosts.size());
   sendPage(String(F("<p>Saved. Restarting&hellip;</p><p class=hint>The settings page will be at "
                     "<a href='http://")) +
-           HOSTNAME + F(".local/'>http://") + HOSTNAME + F(".local</a> once the X4 joins ") + esc(wifi.ssid) +
+           HOSTNAME + F(".local/'>http://") + HOSTNAME + F(".local</a> once the " BOARD_NAME " joins ") + esc(wifi.ssid) +
            F(".</p>"));
   restartAt = millis() + 1500;
 }
