@@ -1493,8 +1493,10 @@ bool menuInput(Buttons& b) {
       break;
     case M_DEVICE: screen = Screen::Device; break;
     case M_FLIP:
+#if !defined(PREVIEW_COMPACT)  // the preview is pinned landscape; don't save its flip for the X4 build
       rotation = rotation == 1 ? 3 : 1;
       settings::saveRotation(rotation);
+#endif
       lastView = View::None;  // redraw all of it, the other way up
       break;
     case M_RESTART:
