@@ -31,7 +31,7 @@ const GFXfont* F_BOLD = &FreeSansBold9pt7b;
 const GFXfont* F_TEXT = &FreeSans9pt7b;
 const GFXfont* F_SMALL = &FreeSans7pt7b;
 const int HEADER_H = 32;
-const int FOOTER_H = 24;
+const int FOOTER_H = 0;  // M9 has physical keys; no on-screen hint row
 const int ROW_H = 46;
 const int OPTION_H = 28;       // option row without a description
 const int OPTION_DESC_H = 42;  // with one
@@ -459,24 +459,8 @@ void drawNotice() {
 }
 
 #if LAYOUT_COMPACT
-// What the keys do, each label after the key's name.
-void footer(const char* back, const char* confirm, const char* left, const char* right) {
-  const char* const keys[4] = {"Del", "Enter", "<", ">"};
-  const char* const labels[4] = {back, confirm, left, right};
-  int top = H() - FOOTER_H;
-  display.drawFastHLine(0, top, W(), color::RULE);
-  display.setFont(F_SMALL);
-  int x = MARGIN, base = top + FOOTER_H / 2 + 5;
-  for (int i = 0; i < 4; i++) {
-    if (!labels[i] || !*labels[i]) continue;
-    int kw = textWidth(keys[i]) + 8;
-    display.fillRoundRect(x, base - 12, kw, 16, 3, color::KEY_BG);
-    text(x + 4, base, keys[i], F_SMALL, color::KEY_FG);
-    x += kw + 4;
-    text(x, base, labels[i], F_SMALL);
-    x += textWidth(labels[i]) + 12;
-  }
-}
+// The M9 has a full physical keyboard, so no on-screen key hints are drawn.
+void footer(const char*, const char*, const char*, const char*) {}
 #else
 // Labels for the row of keys under the screen, each drawn above its key.
 void footer(const char* back, const char* confirm, const char* left, const char* right) {
@@ -798,7 +782,7 @@ void drawDetail(Gateway& gw, Agents& agents) {
   footer("Back", gw.cardPending() && gw.watchedId() == a.id ? "Answer" : "", "", "");
 #else
   bool s = hasSession(a);
-  footer("Back", gw.cardPending() && gw.watchedId() == a.id ? "Answer" : "", s ? "Keys" : "", s ? "Prompt" : "");
+  footer("Back", gw.cardPending() && gw.watchedId() == a.id ? "Answer" : "", "", s ? "Prompt" : "");
 #endif
 }
 
@@ -821,10 +805,17 @@ void drawPrompts(Gateway& gw, Agents& agents) {
   if (ai < 0) return;
   int top = cardHead(gw, agents, agents[ai]);
   text(MARGIN, top + S(24), "Send a prompt", F_BOLD);
-  std::vector<String> labels = {HAS_KEYBOARD ? "Type a prompt... (or just type)" : "Type a prompt..."};
+  std::vector<String> labels;
+#if CAN_COMPOSE
+  labels.push_back(HAS_KEYBOARD ? "Type a prompt... (or just type)" : "Type a prompt...");
+#endif
   for (const String& p : canned) labels.push_back(ascii(p));
   menuRows(labels, {}, menuSel, top + S(40), H() - FOOTER_H - S(20));
+#if CAN_COMPOSE
   footer("Back", menuSel ? "Send" : "Type", "", menuSel ? "Edit" : "");
+#else
+  footer("Back", canned.size() ? "Send" : "", "", "");
+#endif
 }
 
 int kbBottomKey(int x) {
@@ -1387,6 +1378,7 @@ bool promptsInput(Buttons& b) {
     screen = Screen::Detail;
     return true;
   }
+#if CAN_COMPOSE
   if (menuMove(b, canned.size() + 1)) return true;
   if (b.wasPressed(BTN_RIGHT) && menuSel > 0) {
     openKeyboard(canned[menuSel - 1]);
@@ -1398,6 +1390,11 @@ bool promptsInput(Buttons& b) {
     return true;
   }
   sendText = canned[menuSel - 1];
+#else
+  if (menuMove(b, canned.size())) return true;
+  if (!b.wasPressed(BTN_CONFIRM) || canned.empty()) return false;
+  sendText = canned[menuSel];
+#endif
   sendAfterDraw = Send::Prompt;
   showNotice("Sending: " + sendText);
   return true;
@@ -1612,21 +1609,22 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
       return true;
     }
     case View::Detail: {
+#if !HAS_KEYBOARD
       int i = agents.indexOf(selectedId);
       bool session = i >= 0 && hasSession(agents[i]);
+#endif
       if (b.wasPressed(BTN_BACK)) screen = Screen::List;
       else if (b.wasPressed(BTN_DOWN)) moveCursor(agents, 1);
       else if (b.wasPressed(BTN_UP)) moveCursor(agents, -1);
       else if (b.wasPressed(BTN_CONFIRM) && gw.cardPending() && gw.watchedId() == selectedId) {
         agents.setDismissed(selectedId, false);
         openCard(Screen::Detail);
-      } else if (b.wasPressed(BTN_LEFT) && session) {
-        menuSel = 0;
-        screen = Screen::Keys;
+#if !HAS_KEYBOARD
       } else if (b.wasPressed(BTN_RIGHT) && session) {
         menuSel = 0;
         canned = settings::prompts();
         screen = Screen::Prompts;
+#endif
       } else return false;
       agents.markSeen(selectedId);
       return true;

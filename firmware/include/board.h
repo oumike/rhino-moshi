@@ -37,6 +37,12 @@ enum ButtonIndex : uint8_t {
 #define HAS_KEYBOARD 0
 #endif
 
+// Keyboard builds can compose free-text prompts and send raw keys. Read-only
+// builds (no keyboard) only view agents, answer cards, and send canned prompts.
+#ifndef CAN_COMPOSE
+#define CAN_COMPOSE HAS_KEYBOARD
+#endif
+
 // The M9's small landscape layout. PREVIEW_COMPACT draws it on an X4, in the
 // top-left 320x240 of the panel turned landscape, to check it by screenshot.
 #if defined(BOARD_M9) || defined(PREVIEW_COMPACT)
