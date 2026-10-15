@@ -24,132 +24,83 @@ void Buttons::begin() {
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);  // full ~0-3.3V swing, matching the ladder
   pinMode(PIN_BUTTON_POWER, INPUT_PULLUP);
+  queue_ = xQueueCreate(QUEUE_SIZE, sizeof(Event));
+  last_ = stable_ = readState();
+  // Above the loop task, so a busy loop can't starve it; it runs for
+  // microseconds every SAMPLE_MS.
+  xTaskCreate(task, "buttons", 3072, this, 3, nullptr);
 }
 
-uint16_t Buttons::readState() {
-  uint16_t state = 0;
+void Buttons::task(void* self) {
+  TickType_t wake = xTaskGetTickCount();
+  for (;;) {
+    static_cast<Buttons*>(self)->sample();
+    vTaskDelayUntil(&wake, pdMS_TO_TICKS(SAMPLE_MS));
+  }
+}
 
-  rawAdc1_ = readAdc16(PIN_BUTTON_ADC_1);
-  int8_t b1 = decodeLadder(rawAdc1_, BUTTON_ADC_1_RANGES, BUTTON_ADC_1_COUNT);
+uint8_t Buttons::readState() {
+  uint8_t state = 0;
+
+  int8_t b1 = decodeLadder(readAdc16(PIN_BUTTON_ADC_1), BUTTON_ADC_1_RANGES, BUTTON_ADC_1_COUNT);
   if (b1 >= 0) state |= (1 << b1);
 
-  rawAdc2_ = readAdc16(PIN_BUTTON_ADC_2);
-  int8_t b2 = decodeLadder(rawAdc2_, BUTTON_ADC_2_RANGES, BUTTON_ADC_2_COUNT);
+  int8_t b2 = decodeLadder(readAdc16(PIN_BUTTON_ADC_2), BUTTON_ADC_2_RANGES, BUTTON_ADC_2_COUNT);
   if (b2 >= 0 && swapUpDown_) b2 = 1 - b2;
   if (b2 >= 0) state |= (1 << (b2 + 4));  // ladder 2 starts at BTN_UP
 
   if (digitalRead(PIN_BUTTON_POWER) == LOW) state |= (1 << BTN_POWER);
 
+  if (injectMask_) {
+    if ((long)(injectUntil_ - millis()) > 0) {
+      state |= injectMask_;
+    } else {
+      injectMask_ = 0;
+      injectFreeAt_ = millis() + 2 * DEBOUNCE_MS;
+    }
+  }
   return state;
 }
 
-void Buttons::resync(unsigned long settleMs) {
-  uint8_t state = (uint8_t)readState();
-  current_ = state;
-  last_ = state;
-  pressedEvents_ = 0;
-  releasedEvents_ = 0;
-  queueLen_ = 0;
-  replaying_ = false;
-  lastDebounceAt_ = millis();
-  settleStartedAt_ = lastDebounceAt_;
-  settleMs_ = settleMs;
+void Buttons::inject(uint8_t button, unsigned long heldMs) {
+  injectUntil_ = millis() + heldMs;
+  injectFreeAt_ = injectUntil_ + 2 * DEBOUNCE_MS;
+  injectMask_ = 1 << button;
 }
 
-void Buttons::beginCapture() {
-  capturing_ = true;
+void Buttons::push(const Event& e) {
+  xQueueSend(queue_, &e, 0);  // full: drop the newest rather than block sampling
 }
 
-void Buttons::endCapture(bool keep) {
-  capturing_ = false;
-  if (!keep) resync();
-}
-
-void Buttons::push() {
-  if (queueLen_ >= QUEUE_SIZE) return;
-  queue_[(queueHead_ + queueLen_) % QUEUE_SIZE] = {pressedEvents_, releasedEvents_, releasedEvents_ ? heldTime() : 0};
-  queueLen_++;
-}
-
-bool Buttons::replay() {
-  if (!queueLen_) return false;
-  const Event& e = queue_[queueHead_];
-  queueHead_ = (queueHead_ + 1) % QUEUE_SIZE;
-  queueLen_--;
-  pressedEvents_ = e.pressed;
-  releasedEvents_ = e.released;
-  replaying_ = e.released != 0;
-  replayHeld_ = e.held;
-  return true;
-}
-
-void Buttons::update() {
+void Buttons::sample() {
   unsigned long now = millis();
-  uint8_t state = (uint8_t)readState();
-
-  pressedEvents_ = 0;
-  releasedEvents_ = 0;
-  replaying_ = false;
-
-  if (!capturing_ && !queueLen_) {
-    if (injectRelease_) {
-      releasedEvents_ = injectRelease_;
-      injectRelease_ = 0;
-      replaying_ = true;  // so heldTime() reports the injected hold
-      replayHeld_ = injectHeld_;
-      return;
-    }
-    if (injectPress_) {
-      pressedEvents_ = injectPress_;
-      injectRelease_ = injectPress_;
-      injectPress_ = 0;
-      return;
-    }
-  }
-
-  // Inside the post-refresh settling window, keep the baseline following the
-  // reading but refuse to emit events. A rail still recovering from a refresh
-  // can sit in a button's voltage band for longer than DEBOUNCE_MS, which is
-  // otherwise indistinguishable from someone holding that button down.
-  if (settleMs_ > 0) {
-    if (now - settleStartedAt_ < settleMs_) {
-      last_ = state;
-      current_ = state;
-      lastDebounceAt_ = now;
-      return;
-    }
-    settleMs_ = 0;
-  }
-
+  uint8_t state = readState();
   if (state != last_) {
-    lastDebounceAt_ = now;
     last_ = state;
-    return;
+    changedAt_ = now;
+  } else if (state != stable_ && now - changedAt_ >= DEBOUNCE_MS) {
+    Event e = {};
+    e.pressed = state & ~stable_;
+    e.released = stable_ & ~state;
+    e.at = now;
+    if (e.pressed && !stable_) {
+      pressStartedAt_ = now;
+      holdSent_ = false;
+    }
+    if (e.released) e.heldMs = now - pressStartedAt_;
+    stable_ = state;
+    push(e);
   }
-
-  if (now - lastDebounceAt_ <= DEBOUNCE_MS) return;
-  if (state == current_) return;
-
-  pressedEvents_ = state & ~current_;
-  releasedEvents_ = current_ & ~state;
-
-  if (pressedEvents_ && current_ == 0) pressStartedAt_ = now;
-  if (releasedEvents_ && state == 0) pressFinishedAt_ = now;
-
-  current_ = state;
-
-  // Keep order: while anything is queued, new events join the back of it.
-  if (capturing_ || queueLen_) {
-    push();
-    pressedEvents_ = 0;
-    releasedEvents_ = 0;
+  if (stable_ && !holdSent_ && now - pressStartedAt_ >= HOLD_MS) {
+    holdSent_ = true;
+    push({0, 0, stable_, now, now - pressStartedAt_});
   }
 }
 
-unsigned long Buttons::heldTime() const {
-  if (replaying_) return replayHeld_;
-  if (current_ != 0) return millis() - pressStartedAt_;
-  return pressFinishedAt_ - pressStartedAt_;
+bool Buttons::next() {
+  if (xQueueReceive(queue_, &event_, 0) == pdTRUE) return true;
+  event_ = {};
+  return false;
 }
 
 const char* Buttons::name(uint8_t button) {

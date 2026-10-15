@@ -244,9 +244,13 @@ from `main`. It adds:
   after 15 partials at the next screen change, or after 30 anywhere except
   the keyboard.
 - Frames go to the panel in one 20 MHz SPI burst rather than byte by byte.
-- Buttons are read through a refresh, and presses made during one are replayed
-  in order afterwards, so a burst of moves costs one refresh. They are dropped
-  if the screen changed under them, or on a decision card.
+- Buttons are sampled in a task of their own and queued, so no press is lost
+  to a refresh. Every queued press is applied in order before the next draw,
+  so a burst of moves costs one refresh. On a decision card, only presses made
+  after the card was on screen count.
+- The network runs in its own task. A slow or dropped SSH link (calls can
+  block for 10 s) never holds up the buttons or the screen, and sends happen
+  in the background with a notice when they finish.
 - Ephemeral status lines update at most every 10 s.
 - Wi-Fi stays associated while connected. USB power is expected for all-day
   use.

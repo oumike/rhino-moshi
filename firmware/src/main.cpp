@@ -16,7 +16,7 @@
 #include "ui.h"
 
 // libssh needs far more than the loop task's default 8 KB of stack.
-SET_LOOP_TASK_STACK_SIZE(50 * 1024);
+SET_LOOP_TASK_STACK_SIZE(32 * 1024);
 
 Buttons buttons;
 Agents agents;
@@ -37,6 +37,29 @@ static void halt(const char* why) {
   while (true) delay(1000);
 }
 
+// Serial debugging: b c l r u d press Back, Confirm, Left, Right, Up, Down;
+// h holds Back; s dumps the screen. Read in a task of its own, so presses land
+// mid-refresh just as real ones do.
+static volatile bool shotRequested = false;
+static void uiTask(void*);
+
+static void serialTask(void*) {
+  for (;;) {
+    while (!buttons.injecting() && Serial.available()) {
+      int c = Serial.read();
+      if (c == 'b') buttons.inject(BTN_BACK);
+      else if (c == 'c') buttons.inject(BTN_CONFIRM);
+      else if (c == 'l') buttons.inject(BTN_LEFT);
+      else if (c == 'r') buttons.inject(BTN_RIGHT);
+      else if (c == 'u') buttons.inject(BTN_UP);
+      else if (c == 'd') buttons.inject(BTN_DOWN);
+      else if (c == 'h') buttons.inject(BTN_BACK, 1000);
+      else if (c == 's') shotRequested = true;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(300);
@@ -46,7 +69,6 @@ void setup() {
   buttons.begin();
   bool forceSetup = false;
   for (int i = 0; i < 10; i++) {  // ~0.5 s to catch Back held at boot
-    buttons.update();
     forceSetup |= buttons.isPressed(BTN_BACK);
     delay(50);
   }
@@ -65,33 +87,31 @@ void setup() {
   // Ages ("finished 5m ago") need wall-clock time; until it arrives they're hidden.
   configTime(0, 0, "pool.ntp.org", "time.google.com");
   gateway.begin(key);
-  buttons.resync();
+  buttons.clearQueue();  // presses made while starting up
+  xTaskCreate(serialTask, "serial", 3072, nullptr, 1, nullptr);
+  xTaskCreate(uiTask, "ui", 8 * 1024, nullptr, 2, nullptr);
 }
 
-// Serial debugging: b c l r u d press Back, Confirm, Left, Right, Up, Down;
-// h holds Back; s dumps the screen.
-static void serialCommands() {
-  while (!buttons.injecting() && Serial.available()) {
-    switch (Serial.read()) {
-      case 'b': buttons.inject(BTN_BACK); break;
-      case 'c': buttons.inject(BTN_CONFIRM); break;
-      case 'l': buttons.inject(BTN_LEFT); break;
-      case 'r': buttons.inject(BTN_RIGHT); break;
-      case 'u': buttons.inject(BTN_UP); break;
-      case 'd': buttons.inject(BTN_DOWN); break;
-      case 'h': buttons.inject(BTN_BACK, 1000); break;
-      case 's': ui::dumpScreen(); break;
-      default: continue;
+// The UI runs in a task of its own, above the network: a press is drawn
+// while the network task sits in a blocking SSH call, which can take seconds
+// when the link drops.
+static void uiTask(void*) {
+  for (;;) {
+    if (shotRequested) {
+      shotRequested = false;
+      ui::dumpScreen();
     }
-    return;  // one per loop, so each is handled before the next
+    buttons.update();
+    gateway.lock();
+    ui::update(gateway, agents, buttons, gateway.takeChanged());
+    gateway.unlock();
+    delay(5);
   }
 }
 
+// The Arduino loop task, with its big stack, is the network task.
 void loop() {
-  serialCommands();
-  buttons.update();
   config_server::handle();
-  bool changed = gateway.poll();
-  ui::update(gateway, agents, buttons, changed);
+  gateway.poll();
   delay(5);
 }

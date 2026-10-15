@@ -1,113 +1,88 @@
 #pragma once
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
 #include "board.h"
 
 /**
- * Debounced reader for the X4's seven buttons.
+ * Debounced, buffered reader for the X4's seven buttons.
  *
- * Six of them share two resistor ladders, so at most one button per ladder can
- * be distinguished at a time -- chords within a ladder read as a third,
- * meaningless voltage. Treat this as "one button at a time" input.
+ * A background task samples the ladders every few milliseconds, whatever the
+ * main loop is doing (a panel refresh, an SSH round trip, parsing a frame),
+ * and queues each press, release and hold in order. The loop takes them one
+ * at a time, so nothing pressed is lost and nothing is reported twice.
+ *
+ * Six of the buttons share two resistor ladders, so at most one button per
+ * ladder can be distinguished at a time -- chords within a ladder read as a
+ * third, meaningless voltage. Treat this as "one button at a time" input.
  */
 class Buttons {
  public:
+  // A press lasting this long also queues a hold event, while still held.
+  static const unsigned long HOLD_MS = 700;
+
+  // Starts the sampling task.
   void begin();
 
-  // Poll and debounce. Call once per loop iteration.
-  void update();
+  // Takes the next queued event into wasPressed()/wasReleased()/wasHeld(), or
+  // clears them if there is none. Call once per loop iteration.
+  void update() { next(); }
+  // The same, returning false when nothing was queued: for draining the queue.
+  bool next();
+  bool queued() const { return uxQueueMessagesWaiting(queue_) > 0; }
+  void clearQueue() { xQueueReset(queue_); }
 
-  /**
-   * Re-baseline to whatever is being read now, discarding pending events, and
-   * ignore transitions for the next `settleMs`.
-   *
-   * Call after anything that blocks the poll loop for a long stretch -- above
-   * all a panel refresh, which starves this of samples for seconds and
-   * disturbs the rail the ladders divide. Without it the first sample
-   * afterwards looks like a fresh transition and registers as a press nobody
-   * made, which on a decision card silently answers it.
-   *
-   * Discarding a press made *during* the refresh is correct, not a loss: the
-   * card was not on screen yet, so nobody could have been answering it.
-   */
-  void resync(unsigned long settleMs = SETTLE_MS);
+  // Live, debounced state.
+  bool isPressed(uint8_t button) const { return stable_ & (1 << button); }
 
-  /**
-   * Keep reading through a panel refresh: between these, call update() from
-   * the panel's busy wait and the events it finds are queued instead of
-   * reported. The ladders read clean while the panel is busy (measured), so
-   * this is safe; endCapture(false) drops the queue and resyncs as before.
-   */
-  void beginCapture();
-  void endCapture(bool keep);
-  // Moves the next queued event into wasPressed()/wasReleased(); false if none.
-  bool replay();
-  bool queued() const { return queueLen_ > 0; }
-  void clearQueue() { queueLen_ = 0; }
+  // The current event.
+  bool wasPressed(uint8_t button) const { return event_.pressed & (1 << button); }
+  bool wasReleased(uint8_t button) const { return event_.released & (1 << button); }
+  bool wasHeld(uint8_t button) const { return event_.held & (1 << button); }
+  bool hasEvent() const { return event_.pressed || event_.released || event_.held; }
+  // When it happened (millis()), 0 with no event.
+  unsigned long eventAt() const { return event_.at; }
+  // For a release or hold: how long the button had been down.
+  unsigned long heldTime() const { return event_.heldMs; }
 
-  bool isPressed(uint8_t button) const { return current_ & (1 << button); }
-  bool wasPressed(uint8_t button) const { return pressedEvents_ & (1 << button); }
-  bool wasReleased(uint8_t button) const { return releasedEvents_ & (1 << button); }
-  bool wasAnyPressed() const { return pressedEvents_ != 0; }
-
-  // How long the current (or most recent) press has lasted, in ms. For a
-  // replayed release, how long that press lasted.
-  unsigned long heldTime() const;
-
-  // A press (and, on the next update(), its release after `heldMs`) as if
-  // made on the keys: for driving the UI over serial while debugging.
-  void inject(uint8_t button, unsigned long heldMs = 80) {
-    injectPress_ = 1 << button;
-    injectHeld_ = heldMs;
-  }
-  bool injecting() const { return injectPress_ || injectRelease_; }
+  // A press of `heldMs` as if made on the keys -- it goes through the same
+  // sampling, debouncing and queue. For driving the UI over serial.
+  void inject(uint8_t button, unsigned long heldMs = 100);
+  // An injected press is still down, or its release not yet debounced.
+  bool injecting() const { return injectMask_ || (long)(injectFreeAt_ - millis()) > 0; }
 
   // Upside down, the side keys trade places: report each as the other so Up
   // stays the upper one.
   void setSwapUpDown(bool swap) { swapUpDown_ = swap; }
 
-  // Raw ladder readings in 16-bit space, for `calibrate`.
-  uint16_t rawAdc1() const { return rawAdc1_; }
-  uint16_t rawAdc2() const { return rawAdc2_; }
-
   static const char* name(uint8_t button);
 
  private:
-  uint16_t readState();
-  void push();
-
   struct Event {
-    uint8_t pressed, released;
-    unsigned long held;
+    uint8_t pressed, released, held;
+    unsigned long at, heldMs;
   };
-  static const int QUEUE_SIZE = 16;
-  Event queue_[QUEUE_SIZE];
-  int queueHead_ = 0;
-  int queueLen_ = 0;
-  bool swapUpDown_ = false;
-  uint8_t injectPress_ = 0, injectRelease_ = 0;
-  unsigned long injectHeld_ = 0;
-  bool capturing_ = false;
-  bool replaying_ = false;
-  unsigned long replayHeld_ = 0;
 
-  uint8_t current_ = 0;
+  static void task(void* self);
+  void sample();
+  uint8_t readState();
+  void push(const Event& e);
+
+  QueueHandle_t queue_ = nullptr;
+  Event event_ = {};
+
+  // Sampling task state.
+  volatile uint8_t stable_ = 0;
   uint8_t last_ = 0;
-  uint8_t pressedEvents_ = 0;
-  uint8_t releasedEvents_ = 0;
-  unsigned long lastDebounceAt_ = 0;
-  unsigned long pressStartedAt_ = 0;
-  unsigned long pressFinishedAt_ = 0;
-  unsigned long settleStartedAt_ = 0;
-  unsigned long settleMs_ = 0;
-  uint16_t rawAdc1_ = 0;
-  uint16_t rawAdc2_ = 0;
+  unsigned long changedAt_ = 0, pressStartedAt_ = 0;
+  bool holdSent_ = false;
+  volatile bool swapUpDown_ = false;
+  volatile uint8_t injectMask_ = 0;
+  volatile unsigned long injectUntil_ = 0, injectFreeAt_ = 0;
 
+  static const int QUEUE_SIZE = 32;
+  static const unsigned long SAMPLE_MS = 5;
   static const unsigned long DEBOUNCE_MS = 50;
-
-  // How long the ladders are treated as untrustworthy after a panel refresh.
-  // Comfortably longer than DEBOUNCE_MS, so a reading disturbed by the refresh
-  // cannot survive long enough to debounce into a press.
-  static const unsigned long SETTLE_MS = 250;
 };

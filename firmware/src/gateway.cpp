@@ -19,27 +19,36 @@ const char* REQUIRED_CAPS[] = {"events.watch.workspaces", "events.watch.agent-st
 }  // namespace
 
 void Gateway::begin(ssh_key key) {
+  mutex_ = xSemaphoreCreateRecursiveMutex();
   key_ = key;
   deviceFp_ = keyFingerprint(key);
   host_ = settings::loadHost();
-  if (!host_.isComplete()) {
-    state_ = LinkState::NoHost;
-    return;
-  }
-  state_ = LinkState::Connecting;
+  state_ = host_.isComplete() ? LinkState::Connecting : LinkState::NoHost;
+}
+
+bool Gateway::takeChanged() {
+  bool c = changed_;
+  changed_ = false;
+  return c;
 }
 
 void Gateway::switchHost(int index) {
-  disconnect();
   settings::saveActiveHost(index);
   host_ = settings::loadHost();
   agents_.clear();
   usage_.clear();
+  card_.clear();
   watchId_ = watchSource_ = watchSession_ = answeredKey_ = "";
-  detail_ = "";
+  detail_ = fingerprint_ = "";
   backoffMs_ = 0;
   nextAttemptAt_ = 0;
   state_ = host_.isComplete() ? LinkState::Connecting : LinkState::NoHost;
+  gen_++;  // the network task drops the old connection
+  if (reqPending_) {
+    reqPending_ = false;
+    result_ = {reqKind_, -1, "Switched hosts"};
+    resultReady_ = true;
+  }
   changed_ = true;
   Serial.printf("[gw] switched to host %d: %s\n", index, host_.name.c_str());
 }
@@ -49,18 +58,27 @@ unsigned long Gateway::retryIn() const {
   return nextAttemptAt_ && left > 0 ? left : 0;
 }
 
+// Network task, unlocked: closing can block on a dead link.
 void Gateway::disconnect() {
   ws_.reset();
   link_.close();
-  card_.clear();
 }
 
+// Network task, unlocked.
 void Gateway::fail(LinkState state, const String& detail, bool retry) {
   disconnect();
+  Guard g(*this);
+  if (linkGen_ != gen_) return;  // a host switch overtook this attempt
+  card_.clear();
   state_ = state;
   detail_ = detail;
   changed_ = true;
   nextAttemptAt_ = 0;
+  if (reqPending_) {
+    reqPending_ = false;
+    result_ = {reqKind_, -1, "Connection lost"};
+    resultReady_ = true;
+  }
   if (!retry) return;
   unsigned long wait;
   if (state == LinkState::AuthRefused) {
@@ -77,38 +95,46 @@ void Gateway::fail(LinkState state, const String& detail, bool retry) {
 }
 
 void Gateway::trustHostKey() {
-  if (state_ != LinkState::HostKeyUnknown || fingerprint().isEmpty()) return;
-  settings::pinHostKey(fingerprint());
-  host_.hostKey = fingerprint();
-  Serial.printf("[gw] trusted host key %s\n", fingerprint().c_str());
+  if (state_ != LinkState::HostKeyUnknown || fingerprint_.isEmpty()) return;
+  settings::pinHostKey(fingerprint_);
+  host_.hostKey = fingerprint_;
+  Serial.printf("[gw] trusted host key %s\n", fingerprint_.c_str());
   retryNow();
 }
 
 void Gateway::retryNow() {
   if (state_ == LinkState::NoHost || state_ == LinkState::Online) return;
-  disconnect();
   backoffMs_ = 0;
   nextAttemptAt_ = 0;
   state_ = LinkState::Connecting;
   changed_ = true;
 }
 
+// Network task, unlocked.
 void Gateway::attempt() {
+  HostConfig host;
+  {
+    Guard g(*this);
+    linkGen_ = gen_;
+    host = host_;
+  }
+  disconnect();
   if (WiFi.status() != WL_CONNECTED) {
     fail(LinkState::Waiting, "Wi-Fi is down", true);
     return;
   }
-  Serial.printf("[gw] connecting to %s@%s:%u\n", host_.user.c_str(), host_.address.c_str(), host_.port);
+  Serial.printf("[gw] connecting to %s@%s:%u\n", host.user.c_str(), host.address.c_str(), host.port);
   unsigned long t0 = millis();
-  switch (link_.connect(host_, key_)) {
+  SshResult r = link_.connect(host, key_);
+  {
+    Guard g(*this);
+    if (linkGen_ == gen_) fingerprint_ = link_.fingerprint();
+  }
+  switch (r) {
     case SshResult::Ok: break;
     case SshResult::Unreachable: fail(LinkState::Waiting, link_.error(), true); return;
-    case SshResult::HostKeyUnknown:
-      fail(LinkState::HostKeyUnknown, "", false);
-      return;
-    case SshResult::HostKeyChanged:
-      fail(LinkState::HostKeyChanged, "pinned " + settings::pinnedHostKey(), false);
-      return;
+    case SshResult::HostKeyUnknown: fail(LinkState::HostKeyUnknown, "", false); return;
+    case SshResult::HostKeyChanged: fail(LinkState::HostKeyChanged, "pinned " + host.hostKey, false); return;
     case SshResult::AuthRefused: fail(LinkState::AuthRefused, link_.error(), true); return;
   }
   Serial.printf("[gw] ssh up in %lu ms\n", millis() - t0);
@@ -148,10 +174,18 @@ void Gateway::attempt() {
     fail(LinkState::GatewayDown, ch ? "/events: " + err : link_.error(), true);
     return;
   }
-  if (!sendWatch()) {
+  String watch;
+  {
+    Guard g(*this);
+    watch = watchFrame();
+    watchDirty_ = false;
+  }
+  if (!ws_.sendText(watch)) {
     fail(LinkState::Waiting, "could not send watch", true);
     return;
   }
+  Guard g(*this);
+  if (linkGen_ != gen_) return;  // switched hosts meanwhile: poll() drops this link
   Serial.printf("[gw] online: moshi-hook %s on %s, %lu ms\n", (const char*)(version["version"] | "?"),
                 (const char*)(version["hostname"] | "?"), millis() - t0);
   state_ = LinkState::Online;
@@ -162,7 +196,85 @@ void Gateway::attempt() {
   changed_ = true;
 }
 
-bool Gateway::sendWatch() {
+// Network task, unlocked.
+void Gateway::poll() {
+  LinkState state;
+  bool stale;
+  {
+    Guard g(*this);
+    state = state_;
+    stale = linkGen_ != gen_;
+    if (stale) linkGen_ = gen_;
+  }
+  if (stale) disconnect();
+  switch (state) {
+    case LinkState::Connecting: attempt(); break;
+    case LinkState::Online: pollOnline(); break;
+    default: {
+      Guard g(*this);
+      if (state_ == state && nextAttemptAt_ && retryIn() == 0) {
+        nextAttemptAt_ = 0;
+        state_ = LinkState::Connecting;  // shown first, attempted on the next poll
+        changed_ = true;
+      }
+      break;
+    }
+  }
+}
+
+// Network task, unlocked.
+void Gateway::pollOnline() {
+  if (WiFi.status() != WL_CONNECTED) {
+    fail(LinkState::Waiting, "Wi-Fi is down", true);
+    return;
+  }
+  String watch;
+  {
+    Guard g(*this);
+    if (watchDirty_) watch = watchFrame();
+    watchDirty_ = false;
+  }
+  if (watch.length() && !ws_.sendText(watch)) {
+    fail(LinkState::Waiting, "connection lost", true);
+    return;
+  }
+  runRequest();
+  {
+    Guard g(*this);
+    if (state_ != LinkState::Online) return;  // the request found the link dead
+  }
+  for (int i = 0; i < MAX_MESSAGES_PER_POLL; i++) {
+    WsClient::Poll p = ws_.poll();
+    if (p == WsClient::Poll::Nothing) break;
+    if (p == WsClient::Poll::Closed) {
+      fail(LinkState::Waiting, "connection lost", true);
+      return;
+    }
+    Guard g(*this);
+    if (linkGen_ != gen_) return;
+    if (p == WsClient::Poll::Oversized) {
+      Serial.println("[gw] dropped an oversized frame");
+      // Workspace frames stay well under the cap; a huge one is a plan.
+      if (watchSession_.length()) {
+        card_.markOversized();
+        changed_ = true;
+      }
+      continue;
+    }
+    changed_ |= handleMessage();
+    ws_.trim();
+  }
+  unsigned long now = millis();
+  unsigned long quiet = now - ws_.lastReceived();
+  if (quiet > DEAD_AFTER_MS) {
+    fail(LinkState::Waiting, "gateway stopped answering", true);
+  } else if (quiet > PING_AFTER_MS && now - lastPingAt_ > PING_AFTER_MS) {
+    lastPingAt_ = now;
+    if (!ws_.sendPing()) fail(LinkState::Waiting, "connection lost", true);
+  }
+}
+
+String Gateway::watchFrame() const {
   JsonDocument w;
   JsonObject watch = w["watch"].to<JsonObject>();
   watch["workspaces"] = true;
@@ -173,7 +285,7 @@ bool Gateway::sendWatch() {
   }
   String text;
   serializeJson(w, text);
-  return ws_.sendText(text);
+  return text;
 }
 
 void Gateway::watch(const Agent* a) {
@@ -184,9 +296,9 @@ void Gateway::watch(const Agent* a) {
   watchSource_ = a ? a->kind : String();
   watchSession_ = session;
   card_.clear();
+  watchDirty_ = true;
   changed_ = true;
   Serial.printf("[gw] watching %s\n", id.length() ? id.c_str() : "no agent");
-  if (state_ == LinkState::Online && !sendWatch()) fail(LinkState::Waiting, "connection lost", true);
 }
 
 bool Gateway::cardPending() const {
@@ -262,34 +374,75 @@ bool Gateway::handleMessage() {
   return changed;
 }
 
-Gateway::Answer Gateway::answer(bool approve, const int* choices, String& error) {
-  if (state_ != LinkState::Online || !cardPending()) {
+bool Gateway::startRequest(Request kind, const char* path, const String& body, String& error) {
+  if (state_ != LinkState::Online) {
     error = "Not connected";
-    return Answer::Failed;
+    return false;
+  }
+  if (reqPending_) {
+    error = "Still sending";
+    return false;
+  }
+  reqKind_ = kind;
+  reqPath_ = path;
+  reqBody_ = body;
+  reqId_++;
+  reqPending_ = true;
+  return true;
+}
+
+bool Gateway::takeResult(Result& r) {
+  if (!resultReady_) return false;
+  resultReady_ = false;
+  r = result_;
+  return true;
+}
+
+// Network task, unlocked.
+void Gateway::runRequest() {
+  String path, body;
+  uint32_t id;
+  {
+    Guard g(*this);
+    if (!reqPending_) return;
+    path = reqPath_;
+    body = reqBody_;
+    id = reqId_;
+  }
+  String error;
+  int status = post(path, body, error);
+  Guard g(*this);
+  if (!reqPending_ || reqId_ != id) return;  // abandoned: switched hosts
+  reqPending_ = false;
+  if (reqKind_ == Request::Answer && (status == 200 || status == 409)) answeredKey_ = reqCardKey_;
+  result_ = {reqKind_, status, error};
+  resultReady_ = true;
+  changed_ = true;
+}
+
+bool Gateway::answer(bool approve, const int* choices, String& error) {
+  if (!cardPending()) {
+    error = "Nothing to answer";
+    return false;
   }
   String body;
   const char* path = card_.answerRequest(approve, choices, body);
   if (!path) {
     error = "Can't answer this from the X4";
-    return Answer::Failed;
+    return false;
   }
-  int status = post(path, body, error);
-  if (status == 200 || status == 409) {
-    answeredKey_ = card_.key();
-    changed_ = true;
-  }
-  if (status == 200) return Answer::Sent;
-  if (status == 409) return Answer::Stale;
-  return Answer::Failed;
+  if (!startRequest(Request::Answer, path, body, error)) return false;
+  reqCardKey_ = card_.key();
+  return true;
 }
 
-// Blocking POST to the gateway. Returns the HTTP status, or -1; sets `error`
-// to the gateway's message for anything but 200.
-int Gateway::post(const char* path, const String& body, String& error) {
+// Network task, unlocked. Returns the HTTP status, or -1; sets `error` to the
+// gateway's message for anything but 200.
+int Gateway::post(const String& path, const String& body, String& error) {
   unsigned long t0 = millis();
   String resp;
-  int status = gatewayRequest(link_, "POST", path, body, resp, 1024);
-  Serial.printf("[gw] POST %s -> %d in %lu ms %s\n", path, status, millis() - t0, resp.c_str());
+  int status = gatewayRequest(link_, "POST", path.c_str(), body, resp, 1024);
+  Serial.printf("[gw] POST %s -> %d in %lu ms %s\n", path.c_str(), status, millis() - t0, resp.c_str());
   if (status == 200) return status;
   if (status < 0) {
     error = "No answer from moshi-hook";
@@ -318,85 +471,24 @@ bool terminalRequest(const Agent& a, JsonDocument& doc, String& error) {
 
 bool Gateway::sendKey(const Agent& a, const char* key, String& error) {
   JsonDocument doc;
-  if (state_ != LinkState::Online) {
-    error = "Not connected";
-    return false;
-  }
   if (!terminalRequest(a, doc, error)) return false;
   doc["keys"][0] = key;
   String body;
   serializeJson(doc, body);
-  return post("/v1/keys", body, error) == 200;
+  return startRequest(Request::Key, "/v1/keys", body, error);
 }
 
 bool Gateway::sendPrompt(const Agent& a, const String& text, String& error) {
   JsonDocument doc;
-  if (state_ != LinkState::Online) {
-    error = "Not connected";
-    return false;
-  }
   if (!terminalRequest(a, doc, error)) return false;
   doc["text"] = text;
   String body;
   serializeJson(doc, body);
-  return post("/v1/prompt", body, error) == 200;
+  return startRequest(Request::Prompt, "/v1/prompt", body, error);
 }
 
 bool Gateway::takeStatusUpdate() {
   bool u = statusUpdated_;
   statusUpdated_ = false;
   return u;
-}
-
-bool Gateway::poll() {
-  switch (state_) {
-    case LinkState::Connecting:
-      attempt();
-      break;
-    case LinkState::Online: {
-      if (WiFi.status() != WL_CONNECTED) {
-        fail(LinkState::Waiting, "Wi-Fi is down", true);
-        break;
-      }
-      for (int i = 0; i < MAX_MESSAGES_PER_POLL; i++) {
-        WsClient::Poll p = ws_.poll();
-        if (p == WsClient::Poll::Nothing) break;
-        if (p == WsClient::Poll::Closed) {
-          fail(LinkState::Waiting, "connection lost", true);
-          break;
-        }
-        if (p == WsClient::Poll::Oversized) {
-          Serial.println("[gw] dropped an oversized frame");
-          // Workspace frames stay well under the cap; a huge one is a plan.
-          if (watchSession_.length()) {
-            card_.markOversized();
-            changed_ = true;
-          }
-          continue;
-        }
-        changed_ |= handleMessage();
-        ws_.trim();
-      }
-      if (state_ != LinkState::Online) break;
-      unsigned long now = millis();
-      unsigned long quiet = now - ws_.lastReceived();
-      if (quiet > DEAD_AFTER_MS) {
-        fail(LinkState::Waiting, "gateway stopped answering", true);
-      } else if (quiet > PING_AFTER_MS && now - lastPingAt_ > PING_AFTER_MS) {
-        lastPingAt_ = now;
-        if (!ws_.sendPing()) fail(LinkState::Waiting, "connection lost", true);
-      }
-      break;
-    }
-    default:
-      if (nextAttemptAt_ && retryIn() == 0) {
-        nextAttemptAt_ = 0;
-        state_ = LinkState::Connecting;  // shown first, attempted on the next poll
-        changed_ = true;
-      }
-      break;
-  }
-  bool c = changed_;
-  changed_ = false;
-  return c;
 }

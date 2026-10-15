@@ -103,7 +103,7 @@ const int OPTION_DESC_H = 66;  // with one
 // While an agent works its status line ticks every second; redraw for that
 // no more often than this.
 const unsigned long ACTIVITY_MS = 10000;
-const unsigned long HOLD_MS = 700;  // Back held this long cancels the keyboard
+const unsigned long HOLD_MS = Buttons::HOLD_MS;  // Back held this long cancels the keyboard
 
 enum class View { None, Message, Status, List, Detail, Card, Keys, Prompts, Keyboard, Menu, Usage, Hosts, Device };
 enum class Screen { List, Detail, Card, Keys, Prompts, Keyboard, Menu, Usage, Hosts, Device };
@@ -122,6 +122,11 @@ int cursor = 0;
 bool pending = false;  // gateway changes not drawn yet
 bool redrawNow = false;  // a send finished: show its result
 unsigned long lastDrawAt = 0;
+unsigned long inputAt = 0;  // when the press being drawn was made, for timing
+// When the card on screen was first drawn, and for which request: presses
+// made before it was visible were meant for something else.
+unsigned long cardShownAt = 0;
+String shownCardKey;
 long lastMinute = -1;
 
 String notice;  // a short result line under the header, e.g. "Approved"
@@ -136,7 +141,7 @@ int choices[Card::MAX_QUESTIONS];
 int scroll = 0;           // first text line shown (message or plan)
 bool scrollMore = false;  // the last textArea() had more lines below
 int pageLines = 1;        // lines the last textArea() showed
-enum class Send { None, Approve, Deny, Choice, Key, Prompt } sendAfterDraw = Send::None;
+enum class Send { None, Approve, Deny, Choice, Key, Prompt } sendAfterDraw = Send::None, inFlight = Send::None;
 
 // Keys and Prompts menus, and the keyboard.
 struct KeyItem {
@@ -323,11 +328,15 @@ int paragraph(int y, const String& s, const GFXfont* font, int maxLines, int lin
   return y;
 }
 
-Buttons* capture = nullptr;  // read through the panel's busy wait (see Buttons::beginCapture)
+// Set while update() holds the gateway lock; the refresh itself runs without
+// it so the network task isn't held up for the half second the panel takes.
+Gateway* locked = nullptr;
 
-void busyPoll(const void*) {
-  if (capture) capture->update();
-  delay(1);
+bool refresh() {
+  if (locked) locked->unlock();
+  bool more = display.nextPage();
+  if (locked) locked->lock();
+  return more;
 }
 
 template <typename F>
@@ -341,12 +350,15 @@ void paint(bool full, F body) {
     display.setPartialWindow(0, 0, W(), H());
     partials++;
   }
+  unsigned long drawMs = 0;
   display.firstPage();
   do {
+    unsigned long d0 = millis();
     display.fillScreen(GxEPD_WHITE);
     body();
-  } while (display.nextPage());
-  Serial.printf("[ui] %s refresh %lu ms\n", full ? "full" : "partial", millis() - t0);
+    drawMs += millis() - d0;
+  } while (refresh());
+  Serial.printf("[ui] %s refresh %lu ms (draw %lu)\n", full ? "full" : "partial", millis() - t0, drawMs);
 }
 
 String age(double since, bool approx) {
@@ -1164,22 +1176,6 @@ bool cardInput(Gateway& gw, Agents& agents, Buttons& b) {
   return true;
 }
 
-// Sends the answer chosen on the card, after the "Sending" notice is drawn.
-void sendAnswer(Gateway& gw, Send what) {
-  String err;
-  switch (gw.answer(what == Send::Approve, choices, err)) {
-    case Gateway::Answer::Sent:
-      showNotice(what == Send::Approve ? "Approved" : what == Send::Deny ? "Denied" : "Sent");
-      closeCard();
-      break;
-    case Gateway::Answer::Stale:
-      showNotice("Changed on the host: nothing sent");
-      closeCard();
-      break;
-    case Gateway::Answer::Failed: showNotice("Not sent: " + err); break;
-  }
-}
-
 // Picks the agent to watch: the open one, else a blocked one (rotating
 // through them while the watched one has nothing the X4 can answer).
 void steerWatch(Gateway& gw, Agents& agents) {
@@ -1213,24 +1209,50 @@ void steerWatch(Gateway& gw, Agents& agents) {
   }
 }
 
-// Sends the key or prompt chosen, after the "Sending" notice is drawn.
-void sendTerminal(Gateway& gw, Agents& agents, Send what) {
-  int i = agents.indexOf(selectedId);
-  if (i < 0) {
-    showNotice("Not sent: the tab closed");
-    return;
-  }
+// Starts the send just chosen; finishSend() reports how it went.
+void startSend(Gateway& gw, Agents& agents, Send what) {
   String err;
-  if (what == Send::Key) {
-    showNotice(gw.sendKey(agents[i], sendKeyName, err) ? "Sent " + sendLabel : "Not sent: " + err);
-    return;
-  }
-  if (gw.sendPrompt(agents[i], sendText, err)) {
-    showNotice("Prompt sent");
-    draft = "";
-    screen = Screen::Detail;
+  bool ok;
+  if (what == Send::Key || what == Send::Prompt) {
+    int i = agents.indexOf(selectedId);
+    if (i < 0) {
+      showNotice("Not sent: the tab closed");
+      return;
+    }
+    ok = what == Send::Key ? gw.sendKey(agents[i], sendKeyName, err) : gw.sendPrompt(agents[i], sendText, err);
   } else {
-    showNotice("Not sent: " + err);  // a typed draft stays on the keyboard
+    ok = gw.answer(what == Send::Approve, choices, err);
+  }
+  if (ok) inFlight = what;
+  else showNotice("Not sent: " + err);
+}
+
+void finishSend(const Gateway::Result& r) {
+  Send what = inFlight;
+  inFlight = Send::None;
+  bool ok = r.status == 200;
+  switch (r.kind) {
+    case Gateway::Request::Answer:
+      if (ok || r.status == 409) {
+        showNotice(!ok ? "Changed on the host: nothing sent"
+                       : what == Send::Approve ? "Approved"
+                       : what == Send::Deny    ? "Denied"
+                                               : "Sent");
+        if (screen == Screen::Card) closeCard();
+      } else {
+        showNotice("Not sent: " + r.error);
+      }
+      break;
+    case Gateway::Request::Key: showNotice(ok ? "Sent " + sendLabel : "Not sent: " + r.error); break;
+    case Gateway::Request::Prompt:
+      if (ok) {
+        showNotice("Prompt sent");
+        draft = "";
+        if (screen == Screen::Keyboard || screen == Screen::Prompts) screen = Screen::Detail;
+      } else {
+        showNotice("Not sent: " + r.error);  // a typed draft stays on the keyboard
+      }
+      break;
   }
 }
 
@@ -1293,7 +1315,7 @@ void deleteLast(String& s) {
 
 bool keyboardInput(Buttons& b) {
   // Back acts on release: a tap deletes, a hold cancels.
-  if (b.isPressed(BTN_BACK) && !backHoldFired && b.heldTime() >= HOLD_MS) {
+  if (b.wasHeld(BTN_BACK) && !backHoldFired) {
     backHoldFired = true;
     draft = "";
     screen = Screen::Prompts;
@@ -1304,7 +1326,7 @@ bool keyboardInput(Buttons& b) {
       backHoldFired = false;
       return false;
     }
-    // A replayed hold only shows its length on release.
+    // In case the hold event itself was dropped from a full queue.
     if (draft.isEmpty() || b.heldTime() >= HOLD_MS) {
       if (b.heldTime() >= HOLD_MS) draft = "";
       screen = Screen::Prompts;
@@ -1492,7 +1514,6 @@ void begin() {
   SPI.begin(EPD_SCLK, SPI_MISO, EPD_MOSI, EPD_CS);
   // The library's default is 4 MHz; the SSD1677 takes writes at up to 20.
   display.init(0, true, 10, false, SPI, SPISettings(20000000, MSBFIRST, SPI_MODE0));
-  display.epd2.setBusyCallback(busyPoll);
 }
 
 void dumpScreen() {
@@ -1566,8 +1587,13 @@ View viewFor(LinkState st, Agents& agents) {
   }
 }
 
-void update(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
+static void updateLocked(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
   buttons.setSwapUpDown(rotation == 1);
+  Gateway::Result result;
+  if (gw.takeResult(result)) {
+    finishSend(result);
+    redrawNow = true;
+  }
   clampCursor(agents);
   if (agentScreen(screen) && agents.indexOf(selectedId) < 0) screen = Screen::List;  // the tab closed
   steerWatch(gw, agents);
@@ -1590,30 +1616,28 @@ void update(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
   View view = viewFor(gw.state(), agents);
   if (view == View::Detail) changed |= agents.markSeen(selectedId);
 
-  View before = view;
-  bool dirty = handleInput(view, gw, agents, buttons);
-  if (dirty) view = viewFor(gw.state(), agents);  // input may have switched screens
-  if (view != before) buttons.clearQueue();
-  // Presses made during the last refresh, in order, before drawing again --
-  // so a burst of moves costs one refresh. Only while they still apply: not
-  // once the screen has changed under them, nor on a decision card.
-  while (buttons.queued()) {
-    if (view == View::Card || sendAfterDraw != Send::None) {
-      buttons.clearQueue();
-      break;
+  // Every press is applied, in order, before drawing, so a burst of presses
+  // costs one refresh and none is lost. On a decision card only presses made
+  // after it was on screen count; the rest were aimed at whatever was there
+  // before. Sends start at once and report back through finishSend().
+  bool dirty = false;
+  do {
+    if (buttons.hasEvent() && view == View::Card &&
+        (lastView != View::Card || shownCardKey != cardKey || buttons.eventAt() < cardShownAt))
+      continue;
+    if (handleInput(view, gw, agents, buttons)) {
+      dirty = true;
+      if (!inputAt) inputAt = buttons.eventAt();
+      if (sendAfterDraw != Send::None) {
+        startSend(gw, agents, sendAfterDraw);
+        sendAfterDraw = Send::None;
+      }
+      view = viewFor(gw.state(), agents);
     }
-    buttons.replay();
-    dirty |= handleInput(view, gw, agents, buttons);
-    View next = viewFor(gw.state(), agents);
-    if (next != view) {
-      buttons.clearQueue();
-      view = next;
-    }
-  }
+  } while (buttons.next());
   pending |= changed;
   unsigned long now = millis();
-  // A redraw drops presses made during it, so don't redraw for the gateway
-  // while typing.
+  // Don't slow typing down with redraws for the gateway.
   bool typing = view == View::Keyboard;
   if (pending && !typing && now - lastDrawAt >= MIN_REDRAW_MS) dirty = true;
   if (redrawNow) dirty = true;
@@ -1653,8 +1677,6 @@ void update(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
       drawNotice();
     });
   };
-  capture = &buttons;
-  buttons.beginCapture();
   switch (view) {
     case View::List: draw(drawList); break;
     case View::Detail: draw(drawDetail); break;
@@ -1668,35 +1690,31 @@ void update(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
     case View::Device: draw(drawDevice); break;
     default: draw(drawStatus); break;
   }
+  if (inputAt) Serial.printf("[ui] press to screen %lu ms\n", millis() - inputAt);
+  inputAt = 0;
+  if (view == View::Card && (lastView != View::Card || shownCardKey != cardKey)) {
+    cardShownAt = millis();
+    shownCardKey = cardKey;
+  }
   lastView = view;
   lastMinute = minute;
   lastDrawAt = millis();
   pending = false;
   if (view == View::Detail) statusDirty = false;
 
-  capture = nullptr;
-  // Keep what was pressed during the refresh only if it was pressed at this
-  // same screen (see the replay above).
-  buttons.endCapture(!changedView && view != View::Card && sendAfterDraw == Send::None);
 
   if (restartAfterDraw) {
     Serial.println("[ui] restart from the menu");
     delay(200);
     ESP.restart();
   }
+  redrawNow = false;
+}
 
-  if (sendAfterDraw != Send::None) {
-    Send what = sendAfterDraw;
-    sendAfterDraw = Send::None;
-    if (what == Send::Key || what == Send::Prompt) sendTerminal(gw, agents, what);
-    else sendAnswer(gw, what);
-    pending = true;
-    redrawNow = true;
-    lastDrawAt = 0;
-    buttons.resync();  // the request blocked the loop
-  } else {
-    redrawNow = false;
-  }
+void update(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
+  locked = &gw;
+  updateLocked(gw, agents, buttons, changed);
+  locked = nullptr;
 }
 
 }  // namespace ui

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include "agents.h"
 #include "card.h"
@@ -25,6 +27,12 @@ enum class LinkState {
  * The connection to one host's moshi-hook: SSH session, /events socket and
  * reconnects. Feeds workspace frames into an Agents list, and follows one
  * agent's status (its pending approval, plan or question) in a Card.
+ *
+ * Threading: poll() runs in the network task and does all the I/O, which can block
+ * for seconds. Everything else is for the UI task, called with lock() held;
+ * none of it blocks. The network task takes the lock only to change state,
+ * never across I/O, so holding it is cheap for the UI -- but the UI must not
+ * hold it through a panel refresh.
  */
 class Gateway {
  public:
@@ -32,14 +40,19 @@ class Gateway {
 
   void begin(ssh_key key);
 
-  // Advance the state machine and drain the socket. May block for a few
-  // seconds while connecting. Returns true if anything visible changed.
-  bool poll();
+  // One round of network work, in the network task. May block for seconds.
+  void poll();
+
+  void lock() { xSemaphoreTakeRecursive(mutex_, portMAX_DELAY); }
+  void unlock() { xSemaphoreGiveRecursive(mutex_); }
+
+  // Anything visible changed since the last call.
+  bool takeChanged();
 
   LinkState state() const { return state_; }
   const HostConfig& host() const { return host_; }
   const String& detail() const { return detail_; }
-  const String& fingerprint() const { return link_.fingerprint(); }
+  const String& fingerprint() const { return fingerprint_; }  // the host's key
   unsigned long retryIn() const;  // ms until the next attempt, in Waiting
 
   // Drop the current host and connect to settings::hosts()[index], making it
@@ -61,37 +74,58 @@ class Gateway {
   // A request is waiting on the watched agent and wasn't answered from here.
   bool cardPending() const;
 
-  enum class Answer { Sent, Stale, Failed };
+  // Requests to the gateway run one at a time, in the background; each start
+  // returns false (with `error`) if it can't. Never retried. takeResult()
+  // reports how the last one went.
+  enum class Request { Answer, Key, Prompt };
+  struct Result {
+    Request kind;
+    int status;  // HTTP status; -1 if no answer
+    String error;
+  };
+  bool busy() const { return reqPending_; }
   // Answer the card: `approve` for approvals, `choices` (one option index per
-  // question) for plans and questions. Blocks for the request. Never retried:
-  // Stale (409) means the request changed on the host and nothing was sent.
-  Answer answer(bool approve, const int* choices, String& error);
-
+  // question) for plans and questions. Status 409 means the request changed
+  // on the host and nothing was sent.
+  bool answer(bool approve, const int* choices, String& error);
   // Type into agent `a`'s terminal: one key ("Escape", "C-c", "Enter",
-  // "BTab", ...) or a prompt, which is submitted. Never retried.
+  // "BTab", ...) or a prompt, which is submitted.
   bool sendKey(const Agent& a, const char* key, String& error);
   bool sendPrompt(const Agent& a, const String& text, String& error);
+  bool takeResult(Result& r);
+
   // A frame for the watched agent arrived since the last call.
   bool takeStatusUpdate();
 
  private:
-  int post(const char* path, const String& body, String& error);
+  struct Guard {
+    Gateway& g;
+    explicit Guard(Gateway& g) : g(g) { g.lock(); }
+    ~Guard() { g.unlock(); }
+  };
+
+  void pollOnline();
+  void runRequest();
+  bool startRequest(Request kind, const char* path, const String& body, String& error);
+  int post(const String& path, const String& body, String& error);
   void attempt();
   void fail(LinkState state, const String& detail, bool retry);
   void disconnect();
   bool handleMessage();
   bool handleAgentStatus();
-  bool sendWatch();
+  String watchFrame() const;
 
+  SemaphoreHandle_t mutex_ = nullptr;
   Agents& agents_;
   ssh_key key_ = nullptr;
   HostConfig host_;
-  String deviceFp_;
+  String deviceFp_, fingerprint_;
   Usage usage_;
-  SshLink link_;
-  WsClient ws_;
+  SshLink link_;  // network task only
+  WsClient ws_;   // network task only
   Card card_;
   String watchId_, watchSource_, watchSession_;
+  bool watchDirty_ = false;  // the watch changed and isn't sent yet
   String answeredKey_;  // last card answered (or found stale) from the X4
   LinkState state_ = LinkState::Connecting;
   String detail_;
@@ -100,4 +134,12 @@ class Gateway {
   unsigned long lastPingAt_ = 0;
   bool changed_ = false;
   bool statusUpdated_ = false;
+  // Bumped by switchHost(): work begun for an older value is dropped.
+  uint32_t gen_ = 0, linkGen_ = 0;
+
+  bool reqPending_ = false, resultReady_ = false;
+  uint32_t reqId_ = 0;
+  Request reqKind_ = Request::Answer;
+  String reqPath_, reqBody_, reqCardKey_;
+  Result result_;
 };
