@@ -145,6 +145,13 @@ String draft;
 int kbRow = 1, kbX = 0;  // kbX: unit under the selection, kept across rows
 bool kbShift = false, kbSym = false, backHoldFired = false;
 
+// The M9 conversation view: scroll position in rendered lines, whether to keep
+// following the newest, and what the last draw measured (for the input task).
+int trScroll = 0;
+bool trFollow = true;
+int trMaxScroll = 0, trRows = 0;
+bool trHasMore = false;
+
 // The menu and its screens.
 enum { M_USAGE, M_HOSTS, M_DEVICE, M_FLIP, M_RESTART, M_COUNT };
 const char* const MENU_ITEMS[M_COUNT] = {"Usage", "Hosts", "Device", "Flip screen", "Restart"};
@@ -745,6 +752,85 @@ String infoText(Gateway& gw, const Agent& a) {
   return s;
 }
 
+#if HAS_TRANSCRIPT
+uint16_t roleColor(Transcript::Role r) {
+  switch (r) {
+    case Transcript::Role::User: return color::WORKING;      // blue: what you asked
+    case Transcript::Role::Assistant: return color::FG;      // bright: the reply
+    default: return color::MUTED;                            // dim: a tool step
+  }
+}
+
+struct ConvLine {
+  String text;
+  uint16_t color;
+  const GFXfont* font;
+};
+
+// Wrap every transcript item into drawable lines, oldest first, a blank line
+// between messages.
+void buildConvLines(const Transcript& t, int maxW, std::vector<ConvLine>& out) {
+  for (const Transcript::Item& it : t.items()) {
+    bool tool = it.role == Transcript::Role::Tool;
+    display.setFont(F_TEXT);
+    String txt = ascii(tool ? "- " + it.text : it.text, true);
+    for (const String& line : layout(txt, maxW, 2000)) out.push_back({line, roleColor(it.role), F_TEXT});
+    out.push_back({String(), 0, F_TEXT});  // spacer
+  }
+  if (!out.empty()) out.pop_back();
+}
+
+// M9: the agent page is its scrollable conversation with an inline compose row.
+void drawDetail(Gateway& gw, Agents& agents) {
+  header(gw, agents);
+  int i = agents.indexOf(selectedId);
+  if (i < 0) return;
+  const Agent& a = agents[i];
+
+  int top = HEADER_H;
+  display.setFont(F_BOLD);
+  text(MARGIN, top + S(18), fit(ascii(a.workspace) + " - " + ascii(a.kind), W() - 2 * MARGIN), F_BOLD);
+  int convTop = top + S(26);
+  int composeH = S(42);
+  int convBottom = H() - composeH;
+  int lineH = S(26);
+  trRows = max(1, (convBottom - convTop) / lineH);
+
+  const Transcript& t = gw.transcript();
+  trHasMore = t.hasMore();
+  std::vector<ConvLine> lines;
+  buildConvLines(t, W() - 2 * MARGIN, lines);
+  trMaxScroll = max(0, (int)lines.size() - trRows);
+  if (trFollow) trScroll = trMaxScroll;
+  trScroll = constrain(trScroll, 0, trMaxScroll);
+
+  if (lines.empty()) {
+    text(MARGIN, convTop + S(20), t.received() ? "No conversation yet." : "Loading conversation...", F_TEXT,
+         color::MUTED);
+  } else {
+    int y = convTop + lineH;
+    for (int r = 0; r < trRows && trScroll + r < (int)lines.size(); r++) {
+      const ConvLine& cl = lines[trScroll + r];
+      if (cl.text.length()) text(MARGIN, y, cl.text, cl.font, cl.color);
+      y += lineH;
+    }
+  }
+  if (trScroll > 0 || t.hasMore()) text(W() - MARGIN - S(8), convTop + S(4), "^", F_SMALL, color::MUTED);
+  if (trScroll < trMaxScroll) text(W() - MARGIN - S(8), convBottom - S(6), "v", F_SMALL, color::MUTED);
+
+  display.fillRect(0, convBottom, W(), S(2), color::RULE);
+  display.setFont(F_TEXT);
+  int composeY = convBottom + S(28);
+  if (draft.length()) {
+    String shown = draft;
+    int w = W() - 2 * MARGIN - textWidth("> ");
+    while (shown.length() && textWidth(shown + "|") > w) shown.remove(0, 1);
+    text(MARGIN, composeY, "> " + shown + "|", F_TEXT);
+  } else {
+    text(MARGIN, composeY, "Type to send a prompt", F_TEXT, color::MUTED);
+  }
+}
+#else
 void drawDetail(Gateway& gw, Agents& agents) {
   header(gw, agents);
   int i = agents.indexOf(selectedId);
@@ -776,15 +862,10 @@ void drawDetail(Gateway& gw, Agents& agents) {
     text(MARGIN, y, "Folder", F_SMALL, color::MUTED);
     paragraph(y + S(24), a.cwd, F_SMALL, LAYOUT_COMPACT ? 1 : 3, S(22));
   }
-#if HAS_KEYBOARD
-  // Keys and Prompt have dedicated buttons on the keyboard, so the footer
-  // doesn't spell them out.
-  footer("Back", gw.cardPending() && gw.watchedId() == a.id ? "Answer" : "", "", "");
-#else
   bool s = hasSession(a);
   footer("Back", gw.cardPending() && gw.watchedId() == a.id ? "Answer" : "", "", s ? "Prompt" : "");
-#endif
 }
+#endif
 
 void drawKeys(Gateway& gw, Agents& agents) {
   int ai = agents.indexOf(selectedId);
@@ -1285,6 +1366,17 @@ void steerWatch(Gateway& gw, Agents& agents) {
     lastWatched = gw.watchedId();
     watchedSince = millis();
   }
+#if HAS_TRANSCRIPT
+  // Follow the open agent's conversation across its screens; a new one resets
+  // the scroll back to the newest message.
+  const Agent* trTarget = (agentScreen(screen) && sel >= 0) ? &agents[sel] : nullptr;
+  String before = gw.transcriptId();
+  gw.watchTranscript(trTarget);
+  if (gw.transcriptId() != before) {
+    trScroll = 0;
+    trFollow = true;
+  }
+#endif
   if (!automatic) return;
 
   if (screen == Screen::List && gw.cardPending() && !target->dismissed) {  // take over the list
@@ -1578,6 +1670,13 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
   if (b.typed() && (view == View::Detail || view == View::Keys || view == View::Prompts)) {
     int i = agents.indexOf(selectedId);
     if (i < 0 || !hasSession(agents[i])) return false;
+#if HAS_TRANSCRIPT
+    // The conversation view composes inline, under the transcript.
+    if (view == View::Detail) {
+      typeChar(b.typed());
+      return true;
+    }
+#endif
     openKeyboard(String(b.typed()));
     return true;
   }
@@ -1609,25 +1708,49 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
       return true;
     }
     case View::Detail: {
-#if !HAS_KEYBOARD
+#if HAS_TRANSCRIPT
+      const int STEP = 2;
+      if (b.wasPressed(BTN_BACK)) {
+        if (draft.length()) deleteLast(draft);
+        else screen = Screen::List;
+      } else if (b.wasPressed(BTN_CONFIRM)) {
+        if (draft.length()) sendDraft();
+        else if (gw.cardPending() && gw.watchedId() == selectedId) {
+          agents.setDismissed(selectedId, false);
+          openCard(Screen::Detail);
+        } else return false;
+      } else if (b.wasPressed(BTN_UP)) {
+        if (trScroll <= 0) {
+          if (trHasMore) gw.requestOlderTranscript();
+          else return false;
+        } else {
+          trScroll = max(0, trScroll - STEP);
+          trFollow = false;
+        }
+      } else if (b.wasPressed(BTN_DOWN)) {
+        if (trScroll >= trMaxScroll) return false;
+        trScroll = min(trMaxScroll, trScroll + STEP);
+        trFollow = trScroll >= trMaxScroll;
+      } else return false;
+      agents.markSeen(selectedId);
+      return true;
+#else
       int i = agents.indexOf(selectedId);
       bool session = i >= 0 && hasSession(agents[i]);
-#endif
       if (b.wasPressed(BTN_BACK)) screen = Screen::List;
       else if (b.wasPressed(BTN_DOWN)) moveCursor(agents, 1);
       else if (b.wasPressed(BTN_UP)) moveCursor(agents, -1);
       else if (b.wasPressed(BTN_CONFIRM) && gw.cardPending() && gw.watchedId() == selectedId) {
         agents.setDismissed(selectedId, false);
         openCard(Screen::Detail);
-#if !HAS_KEYBOARD
       } else if (b.wasPressed(BTN_RIGHT) && session) {
         menuSel = 0;
         canned = settings::prompts();
         screen = Screen::Prompts;
-#endif
       } else return false;
       agents.markSeen(selectedId);
       return true;
+#endif
     }
     case View::Card: return cardInput(gw, agents, b);
     case View::Keys: return keysInput(b);
@@ -1762,6 +1885,9 @@ static void updateLocked(Gateway& gw, Agents& agents, Buttons& buttons, bool cha
   }
 
   statusDirty |= gw.takeStatusUpdate();
+#if HAS_TRANSCRIPT
+  if (gw.takeTranscriptUpdate() && view == View::Detail) dirty = true;
+#endif
   if (statusDirty && view == View::Detail) {
     int i = agents.indexOf(selectedId);
     String info = i >= 0 ? infoText(gw, agents[i]) : String();

@@ -15,6 +15,9 @@ const unsigned long INCOMPATIBLE_RETRY_MS = 300000;  // an upgrade takes a while
 const unsigned long PING_AFTER_MS = 30000;
 const unsigned long DEAD_AFTER_MS = 75000;
 const int MAX_MESSAGES_PER_POLL = 4;
+// Physical source rows per transcript page. Kept small so a page stays within
+// the transcript socket's buffer; several rows fold into one shown message.
+const int TRANSCRIPT_LIMIT = 24;
 
 const char* REQUIRED_CAPS[] = {"events.watch.workspaces", "events.watch.agent-status", "approvals.answer"};
 
@@ -41,6 +44,9 @@ void Gateway::switchHost(int index) {
   usage_.clear();
   card_.clear();
   watchId_ = watchSource_ = watchSession_ = answeredKey_ = "";
+  transcript_.clear();
+  trId_ = trSource_ = trSession_ = "";
+  trDirty_ = trOlderReq_ = trOlderPending_ = false;
   detail_ = fingerprint_ = "";
   backoffMs_ = 0;
   nextAttemptAt_ = 0;
@@ -63,6 +69,7 @@ unsigned long Gateway::retryIn() const {
 // Network task, unlocked: closing can block on a dead link.
 void Gateway::disconnect() {
   ws_.reset();
+  tws_.reset();
   link_.close();
 }
 
@@ -195,6 +202,8 @@ void Gateway::attempt() {
   backoffMs_ = 0;
   nextAttemptAt_ = 0;
   lastPingAt_ = millis();
+  trDirty_ = trSession_.length() > 0;  // (re)open the transcript socket
+  trOlderReq_ = trOlderPending_ = false;
   changed_ = true;
 }
 
@@ -266,6 +275,7 @@ void Gateway::pollOnline() {
     changed_ |= handleMessage();
     ws_.trim();
   }
+  pollTranscript();
   unsigned long now = millis();
   unsigned long quiet = now - ws_.lastReceived();
   if (quiet > DEAD_AFTER_MS) {
@@ -274,6 +284,112 @@ void Gateway::pollOnline() {
     lastPingAt_ = now;
     if (!ws_.sendPing()) fail(LinkState::Waiting, "connection lost", true);
   }
+}
+
+// Network task, unlocked. Opens, feeds and pages the transcript socket.
+void Gateway::pollTranscript() {
+  bool dirty, olderReq;
+  String src, sess;
+  int before;
+  {
+    Guard g(*this);
+    dirty = trDirty_;
+    trDirty_ = false;
+    src = trSource_;
+    sess = trSession_;
+    olderReq = trOlderReq_ && !trOlderPending_;
+    trOlderReq_ = false;
+    before = transcript_.oldestLine();
+  }
+
+  if (dirty) {
+    tws_.reset();
+    olderReq = false;  // any pending page was for the old watch
+    if (sess.length()) {
+      String path = String("/v1/transcripts?source=") + src + "&session=" + sess + "&limit=" + TRANSCRIPT_LIMIT;
+      String err;
+      ssh_channel ch = link_.openGateway();
+      if (!ch || !tws_.open(ch, path.c_str(), err)) {
+        Serial.printf("[gw] transcript open failed: %s\n", ch ? err.c_str() : link_.error().c_str());
+        Guard g(*this);
+        trDirty_ = true;  // try again next poll
+        return;
+      }
+      Serial.printf("[gw] transcript watching %s/%s\n", src.c_str(), sess.c_str());
+    }
+  }
+  if (!tws_.isOpen()) return;
+
+  if (olderReq && before > 0) {
+    String m = String("{\"type\":\"older\",\"beforeLine\":") + before + ",\"limit\":" + TRANSCRIPT_LIMIT + "}";
+    if (tws_.sendText(m)) {
+      Guard g(*this);
+      trOlderPending_ = true;
+    }
+  }
+
+  for (int i = 0; i < MAX_MESSAGES_PER_POLL; i++) {
+    WsClient::Poll p = tws_.poll();
+    if (p == WsClient::Poll::Nothing) break;
+    if (p == WsClient::Poll::Closed) {
+      Serial.println("[gw] transcript socket closed");
+      break;
+    }
+    if (p == WsClient::Poll::Oversized) {
+      Serial.println("[gw] dropped an oversized transcript frame");
+      Guard g(*this);
+      trOlderPending_ = false;
+      continue;
+    }
+    Guard g(*this);
+    if (linkGen_ != gen_) return;
+    changed_ |= handleTranscript();
+    tws_.trim();
+  }
+}
+
+bool Gateway::handleTranscript() {
+  static PsRamAllocator alloc;
+  static JsonDocument filter;
+  if (filter.isNull()) Transcript::buildFilter(filter);
+
+  JsonDocument doc(&alloc);
+  DeserializationError err =
+      deserializeJson(doc, tws_.message(), tws_.messageLength(), DeserializationOption::Filter(filter));
+  if (err) {
+    Serial.printf("[gw] transcript frame of %u bytes: %s\n", (unsigned)tws_.messageLength(), err.c_str());
+    return false;
+  }
+  String type;
+  bool c = transcript_.apply(doc.as<JsonObjectConst>(), type);
+  if (type == "older" || type == "reset" || type == "backlog" || type == "resumed") trOlderPending_ = false;
+  if (c) transcriptUpdated_ = true;
+  return c;
+}
+
+void Gateway::watchTranscript(const Agent* a) {
+  String id = a ? a->id : String();
+  String session = a ? a->session : String();
+  if (id == trId_ && session == trSession_) return;
+  trId_ = id;
+  trSource_ = a ? a->kind : String();
+  trSession_ = session;
+  transcript_.clear();
+  trDirty_ = true;
+  trOlderReq_ = trOlderPending_ = false;
+  transcriptUpdated_ = true;
+  changed_ = true;
+}
+
+void Gateway::requestOlderTranscript() {
+  if (!transcript_.hasMore() || trOlderPending_) return;
+  trOlderReq_ = true;
+}
+
+bool Gateway::takeTranscriptUpdate() {
+  bool u = transcriptUpdated_;
+  transcriptUpdated_ = false;
+  return u;
 }
 
 String Gateway::watchFrame() const {

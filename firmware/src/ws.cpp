@@ -1,5 +1,6 @@
 #include "ws.h"
 
+#include <esp_heap_caps.h>
 #include <esp_random.h>
 
 #include "ssh_link.h"
@@ -111,7 +112,10 @@ void WsClient::trim() {
 
 bool WsClient::reserve(size_t cap) {
   if (cap <= cap_) return true;
-  char* p = (char*)realloc(buf_, cap);
+  // A large socket (transcripts) keeps its buffer in PSRAM; the small /events
+  // one stays in internal RAM. Each instance sticks to one allocator.
+  char* p = maxMessage_ > MAX_MESSAGE ? (char*)heap_caps_realloc(buf_, cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+                                      : (char*)realloc(buf_, cap);
   if (!p) return false;
   buf_ = p;
   cap_ = cap;
@@ -162,7 +166,7 @@ WsClient::Poll WsClient::poll() {
       continue;  // a control frame between fragments
     }
 
-    if (oversized_ || len_ + len > MAX_MESSAGE) {
+    if (oversized_ || len_ + len > maxMessage_) {
       oversized_ = true;
       if (!skip(len)) break;
     } else {

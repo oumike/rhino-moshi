@@ -8,6 +8,7 @@
 #include "card.h"
 #include "settings.h"
 #include "ssh_link.h"
+#include "transcript.h"
 #include "usage.h"
 #include "ws.h"
 
@@ -97,6 +98,15 @@ class Gateway {
   // A frame for the watched agent arrived since the last call.
   bool takeStatusUpdate();
 
+  // Follow `a`'s conversation transcript (nullptr: none). Opens a second
+  // socket; cheap when unchanged. Only used on boards that show it.
+  void watchTranscript(const Agent* a);
+  const String& transcriptId() const { return trId_; }
+  const Transcript& transcript() const { return transcript_; }
+  // Ask the host for an older page; no-op if there's none or one is in flight.
+  void requestOlderTranscript();
+  bool takeTranscriptUpdate();
+
  private:
   struct Guard {
     Gateway& g;
@@ -105,6 +115,7 @@ class Gateway {
   };
 
   void pollOnline();
+  void pollTranscript();
   void runRequest();
   bool startRequest(Request kind, const char* path, const String& body, String& error);
   int post(const String& path, const String& body, String& error);
@@ -113,6 +124,7 @@ class Gateway {
   void disconnect();
   bool handleMessage();
   bool handleAgentStatus();
+  bool handleTranscript();
   String watchFrame() const;
 
   SemaphoreHandle_t mutex_ = nullptr;
@@ -123,9 +135,16 @@ class Gateway {
   Usage usage_;
   SshLink link_;  // network task only
   WsClient ws_;   // network task only
+  WsClient tws_{96 * 1024};  // transcripts; a larger PSRAM-backed buffer
   Card card_;
+  Transcript transcript_;
   String watchId_, watchSource_, watchSession_;
   bool watchDirty_ = false;  // the watch changed and isn't sent yet
+  String trId_, trSource_, trSession_;
+  bool trDirty_ = false;       // the transcript socket needs (re)opening
+  bool trOlderReq_ = false;    // an older page was asked for
+  bool trOlderPending_ = false;  // an older request is in flight
+  bool transcriptUpdated_ = false;
   String answeredKey_;  // last card answered (or found stale) from the X4
   LinkState state_ = LinkState::Connecting;
   String detail_;

@@ -43,6 +43,12 @@ enum ButtonIndex : uint8_t {
 #define CAN_COMPOSE HAS_KEYBOARD
 #endif
 
+// Boards with a keyboard, color screen and PSRAM show the watched agent's
+// scrollable conversation transcript and compose prompts inline (M9).
+#ifndef HAS_TRANSCRIPT
+#define HAS_TRANSCRIPT HAS_KEYBOARD
+#endif
+
 // The M9's small landscape layout. PREVIEW_COMPACT draws it on an X4, in the
 // top-left 320x240 of the panel turned landscape, to check it by screenshot.
 #if defined(BOARD_M9) || defined(PREVIEW_COMPACT)

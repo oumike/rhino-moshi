@@ -14,6 +14,11 @@ class WsClient {
 
   enum class Poll { Nothing, Message, Oversized, Closed };
 
+  WsClient() = default;
+  // A larger cap keeps bigger frames (e.g. transcripts); its buffer is taken
+  // from PSRAM when the cap is above MAX_MESSAGE.
+  explicit WsClient(size_t maxMessage) : maxMessage_(maxMessage) {}
+
   ~WsClient() { reset(); }
 
   // Takes ownership of `ch` and performs the upgrade for `path`.
@@ -44,6 +49,7 @@ class WsClient {
   char* buf_ = nullptr;
   size_t cap_ = 0;
   size_t len_ = 0;
+  size_t maxMessage_ = MAX_MESSAGE;
   bool oversized_ = false;
   unsigned long lastRx_ = 0;
 };
