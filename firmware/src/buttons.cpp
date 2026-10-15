@@ -2,6 +2,17 @@
 
 #if defined(BOARD_M9)
 #include <Wire.h>
+#include "soc/usb_serial_jtag_reg.h"
+
+namespace {
+bool kbRead(uint8_t addr, uint8_t reg, uint8_t& value) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  if (Wire.endTransmission() != 0 || Wire.requestFrom(addr, (uint8_t)1) != 1) return false;
+  value = Wire.read();
+  return true;
+}
+}  // namespace
 #endif
 
 void Buttons::task(void* self) {
@@ -48,8 +59,9 @@ const char* Buttons::name(uint8_t button) {
 void Buttons::begin() {
   queue_ = xQueueCreate(QUEUE_SIZE, sizeof(Event));
   pinMode(KB_INT, INPUT_PULLDOWN);
-  pinMode(KB_LED, OUTPUT);
-  digitalWrite(KB_LED, LOW);
+  // The USB PHY holds GPIO20 (SDA) until released.
+  REG_CLR_BIT(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_USB_PAD_ENABLE);
+  delay(5);
   Wire.begin(KB_SDA, KB_SCL, 100000);
   for (uint8_t a : KB_ADDRS) {
     Wire.beginTransmission(a);
@@ -59,12 +71,11 @@ void Buttons::begin() {
     }
   }
   if (kbAddr_) {
-    Wire.beginTransmission(kbAddr_);
-    Wire.write(KB_REG_LONG_PRESS);
-    Wire.write((uint8_t)(HOLD_MS >> 8));
-    Wire.write((uint8_t)(HOLD_MS & 0xFF));
-    Wire.endTransmission();
-    Serial.printf("[kb] keyboard at 0x%02X\n", kbAddr_);
+    uint8_t hw = 0xFF, fw = 0xFF;
+    bool early = kbRead(kbAddr_, KB_REG_HW_VERSION, hw) && kbRead(kbAddr_, KB_REG_FW_VERSION, fw) && hw == 0x03 &&
+                 fw == 0x10;
+    kbReg_ = early ? KB_REG_KEY_EARLY : KB_REG_KEY;
+    Serial.printf("[kb] keyboard at 0x%02X, hw 0x%02X fw 0x%02X, key register 0x%02X\n", kbAddr_, hw, fw, kbReg_);
   } else {
     Serial.println("[kb] no keyboard found");
   }
@@ -95,24 +106,32 @@ void Buttons::sample() {
   bool down = digitalRead(KB_INT) == HIGH;
   stable_ = down ? (1 << BTN_BACK) : 0;
   unsigned long now = millis();
-  // The interrupt line says a key is waiting; poll now and then as well, in
-  // case a pulse was too short to see.
-  if (!kbAddr_ || (!down && now - lastPoll_ < 100)) return;
+  // The controller holds one pending key, so a second press before the poll
+  // replaces the first; early units may never raise the interrupt. Poll often
+  // either way.
+  if (!kbAddr_ || (!down && now - lastPoll_ < 30)) return;
   lastPoll_ = now;
   readKeyboard();
 }
 
 void Buttons::readKeyboard() {
-  Wire.beginTransmission(kbAddr_);
-  Wire.write(KB_REG_KEY);
-  if (Wire.endTransmission() != 0 || Wire.requestFrom(kbAddr_, (uint8_t)1) != 1) return;
-  uint8_t code = Wire.read();
-  if (code == KB_NONE || code == KB_INVALID) return;
+  uint8_t code;
+  if (!kbRead(kbAddr_, kbReg_, code)) return;
+  if (code == KB_NONE || code == 0xFF || code == KB_INVALID) return;
   Serial.printf("[kb] 0x%02X\n", code);
+  bool early = kbReg_ == KB_REG_KEY_EARLY;
   switch (code) {
-    case KB_DEL: tap(BTN_BACK); break;
+    case KB_DEL:
+    case KB_DEL_7F: tap(BTN_BACK); break;
+    case KB_BACK_EARLY:
+      if (early) tap(BTN_BACK);
+      break;
+    case KB_BACK:
+      if (!early) tap(BTN_BACK);
+      break;
     case KB_DEL_LONG: inject(BTN_BACK, HOLD_MS); break;
-    case KB_ENTER: tap(BTN_CONFIRM); break;
+    case KB_ENTER:
+    case KB_ENTER_LF: tap(BTN_CONFIRM); break;
     case KB_LEFT: tap(BTN_LEFT); break;
     case KB_RIGHT: tap(BTN_RIGHT); break;
     case KB_UP: tap(BTN_UP); break;

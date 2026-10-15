@@ -97,6 +97,7 @@ class Buttons {
   void readKeyboard();
   void tap(uint8_t button);
   uint8_t kbAddr_ = 0;
+  uint8_t kbReg_ = 0;
   unsigned long lastPoll_ = 0;
 #endif
 
