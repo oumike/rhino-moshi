@@ -55,6 +55,18 @@ class Buttons {
   // replayed release, how long that press lasted.
   unsigned long heldTime() const;
 
+  // A press (and, on the next update(), its release after `heldMs`) as if
+  // made on the keys: for driving the UI over serial while debugging.
+  void inject(uint8_t button, unsigned long heldMs = 80) {
+    injectPress_ = 1 << button;
+    injectHeld_ = heldMs;
+  }
+  bool injecting() const { return injectPress_ || injectRelease_; }
+
+  // Upside down, the side keys trade places: report each as the other so Up
+  // stays the upper one.
+  void setSwapUpDown(bool swap) { swapUpDown_ = swap; }
+
   // Raw ladder readings in 16-bit space, for `calibrate`.
   uint16_t rawAdc1() const { return rawAdc1_; }
   uint16_t rawAdc2() const { return rawAdc2_; }
@@ -73,6 +85,9 @@ class Buttons {
   Event queue_[QUEUE_SIZE];
   int queueHead_ = 0;
   int queueLen_ = 0;
+  bool swapUpDown_ = false;
+  uint8_t injectPress_ = 0, injectRelease_ = 0;
+  unsigned long injectHeld_ = 0;
   bool capturing_ = false;
   bool replaying_ = false;
   unsigned long replayHeld_ = 0;

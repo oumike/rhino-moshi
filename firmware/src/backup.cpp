@@ -28,6 +28,29 @@ bool mountSd(String& error) {
   return true;
 }
 
+void hostToJson(const HostConfig& host, JsonObject h) {
+  h["name"] = host.name;
+  h["address"] = host.address;
+  h["port"] = host.port;
+  h["user"] = host.user;
+  h["hostKey"] = host.hostKey;
+}
+
+bool validPort(JsonVariantConst port) {
+  return port.isNull() || (port.is<int>() && port.as<int>() >= 1 && port.as<int>() <= 65535);
+}
+
+HostConfig hostFromJson(JsonVariantConst j) {
+  HostConfig h;
+  h.name = j["name"] | "";
+  h.address = j["address"] | "";
+  h.port = j["port"] | 22;
+  h.user = j["user"] | "";
+  h.hostKey = j["hostKey"] | "";
+  if (h.name.isEmpty()) h.name = h.address;
+  return h;
+}
+
 }  // namespace
 
 String toJson() {
@@ -39,13 +62,16 @@ String toJson() {
   doc["wifi"]["ssid"] = wifi.ssid;
   doc["wifi"]["password"] = wifi.password;
 
-  HostConfig host = settings::loadHost();
-  JsonObject h = doc["host"].to<JsonObject>();
-  h["name"] = host.name;
-  h["address"] = host.address;
-  h["port"] = host.port;
-  h["user"] = host.user;
-  h["hostKey"] = settings::pinnedHostKey();
+  // "host" (the active one) is what firmware before multiple hosts restores.
+  std::vector<HostConfig> hosts = settings::hosts();
+  int active = settings::activeHost();
+  JsonArray list = doc["hosts"].to<JsonArray>();
+  for (int i = 0; i < (int)hosts.size(); i++) {
+    JsonObject h = list.add<JsonObject>();
+    hostToJson(hosts[i], h);
+    if (i == active) hostToJson(hosts[i], doc["host"].to<JsonObject>());
+  }
+  doc["activeHost"] = active;
 
   doc["display"]["rotation"] = settings::rotation();
   doc["web"]["password"] = settings::webPassword();
@@ -81,8 +107,9 @@ bool restore(const String& json, String& error) {
     error = "Backup has an invalid orientation.";
     return false;
   }
-  JsonVariantConst port = doc["host"]["port"];
-  if (!port.isNull() && (!port.is<int>() || port.as<int>() < 1 || port.as<int>() > 65535)) {
+  bool portsOk = validPort(doc["host"]["port"]);
+  for (JsonVariantConst h : doc["hosts"].as<JsonArrayConst>()) portsOk &= validPort(h["port"]);
+  if (!portsOk) {
     error = "Backup has an invalid SSH port.";
     return false;
   }
@@ -95,18 +122,14 @@ bool restore(const String& json, String& error) {
     settings::saveWifi(w);
   }
 
-  JsonVariantConst host = doc["host"];
-  if (host.is<JsonObjectConst>()) {
-    HostConfig h = settings::loadHost();
-    h.name = host["name"] | h.name;
-    h.address = host["address"] | h.address;
-    h.port = host["port"] | h.port;
-    h.user = host["user"] | h.user;
-    settings::saveHost(h);
-    // After saveHost, which drops the pin when the address changes.
-    String fp = host["hostKey"] | "";
-    if (fp.length()) settings::pinHostKey(fp);
-    else settings::forgetHostKey();
+  if (JsonArrayConst list = doc["hosts"]) {
+    std::vector<HostConfig> hosts;
+    for (JsonVariantConst h : list) hosts.push_back(hostFromJson(h));
+    settings::saveHosts(hosts);
+    settings::saveActiveHost(doc["activeHost"] | 0);
+  } else if (doc["host"].is<JsonObjectConst>()) {  // a backup from before multiple hosts
+    settings::saveHosts({hostFromJson(doc["host"])});
+    settings::saveActiveHost(0);
   }
 
   if (!rot.isNull()) settings::saveRotation(rot.as<uint8_t>());

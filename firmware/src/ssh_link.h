@@ -12,6 +12,9 @@ extern const int GATEWAY_PORT;
 /** The X4's ed25519 key, loaded from NVS or generated on first boot. */
 ssh_key loadOrCreateDeviceKey();
 
+/** A key's SHA256 fingerprint, "SHA256:...". */
+String keyFingerprint(ssh_key key);
+
 /** The restricted authorized_keys line the host needs for `key`. */
 String authorizedKeysLine(ssh_key key);
 

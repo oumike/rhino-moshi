@@ -20,12 +20,28 @@ const char* REQUIRED_CAPS[] = {"events.watch.workspaces", "events.watch.agent-st
 
 void Gateway::begin(ssh_key key) {
   key_ = key;
+  deviceFp_ = keyFingerprint(key);
   host_ = settings::loadHost();
   if (!host_.isComplete()) {
     state_ = LinkState::NoHost;
     return;
   }
   state_ = LinkState::Connecting;
+}
+
+void Gateway::switchHost(int index) {
+  disconnect();
+  settings::saveActiveHost(index);
+  host_ = settings::loadHost();
+  agents_.clear();
+  usage_.clear();
+  watchId_ = watchSource_ = watchSession_ = answeredKey_ = "";
+  detail_ = "";
+  backoffMs_ = 0;
+  nextAttemptAt_ = 0;
+  state_ = host_.isComplete() ? LinkState::Connecting : LinkState::NoHost;
+  changed_ = true;
+  Serial.printf("[gw] switched to host %d: %s\n", index, host_.name.c_str());
 }
 
 unsigned long Gateway::retryIn() const {
@@ -63,6 +79,7 @@ void Gateway::fail(LinkState state, const String& detail, bool retry) {
 void Gateway::trustHostKey() {
   if (state_ != LinkState::HostKeyUnknown || fingerprint().isEmpty()) return;
   settings::pinHostKey(fingerprint());
+  host_.hostKey = fingerprint();
   Serial.printf("[gw] trusted host key %s\n", fingerprint().c_str());
   retryNow();
 }
@@ -223,6 +240,25 @@ bool Gateway::handleMessage() {
     else if (JsonObjectConst ws = doc["workspaces"]) changed |= agents_.update(ws);
   }
   if (watchSession_.length() && strstr(msg, "\"agentStatus\":{")) changed |= handleAgentStatus();
+  if (strstr(msg, "\"usage\":[")) {
+    static JsonDocument usageFilter;
+    if (usageFilter.isNull()) Usage::buildFilter(usageFilter);
+    JsonDocument doc;
+    DeserializationError err =
+        deserializeJson(doc, msg, ws_.messageLength(), DeserializationOption::Filter(usageFilter));
+    if (err) Serial.printf("[gw] usage frame: %s\n", err.c_str());
+    else if (JsonArrayConst u = doc["usage"]) {
+      bool c = usage_.update(u);
+      if (c) {
+        time_t now = time(nullptr);
+        for (const UsageAccount& a : usage_.accounts())
+          for (const UsageWindow& w : a.windows)
+            Serial.printf("[gw] usage: %s %s %d%%, resets in %lds\n", a.agent.c_str(), w.label.c_str(), w.used,
+                          (long)(w.resetsAt - now));
+      }
+      changed |= c;
+    }
+  }
   return changed;
 }
 

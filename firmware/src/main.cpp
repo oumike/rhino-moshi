@@ -68,7 +68,27 @@ void setup() {
   buttons.resync();
 }
 
+// Serial debugging: b c l r u d press Back, Confirm, Left, Right, Up, Down;
+// h holds Back; s dumps the screen.
+static void serialCommands() {
+  while (!buttons.injecting() && Serial.available()) {
+    switch (Serial.read()) {
+      case 'b': buttons.inject(BTN_BACK); break;
+      case 'c': buttons.inject(BTN_CONFIRM); break;
+      case 'l': buttons.inject(BTN_LEFT); break;
+      case 'r': buttons.inject(BTN_RIGHT); break;
+      case 'u': buttons.inject(BTN_UP); break;
+      case 'd': buttons.inject(BTN_DOWN); break;
+      case 'h': buttons.inject(BTN_BACK, 1000); break;
+      case 's': ui::dumpScreen(); break;
+      default: continue;
+    }
+    return;  // one per loop, so each is handled before the next
+  }
+}
+
 void loop() {
+  serialCommands();
   buttons.update();
   config_server::handle();
   bool changed = gateway.poll();

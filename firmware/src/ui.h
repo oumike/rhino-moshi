@@ -18,4 +18,8 @@ void message(const String& title, const String& body);
 // `changed` is true when the gateway reported a visible change.
 void update(Gateway& gw, Agents& agents, Buttons& buttons, bool changed);
 
+// Writes the last frame sent to the panel to serial, base64, between
+// "SHOT <width> <height> <rotation>" and "END" lines (native orientation).
+void dumpScreen();
+
 }  // namespace ui

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "board.h"
+#include "config_server.h"
 #include "settings.h"
 
 namespace ui {
@@ -22,6 +23,7 @@ namespace {
 // first write after init, falls through to the library.
 class X4Panel : public GxEPD2_426_GDEQ0426T82 {
  public:
+  static inline const uint8_t* lastFrame = nullptr;  // for dumpScreen()
   using GxEPD2_426_GDEQ0426T82::GxEPD2_426_GDEQ0426T82;
   using Base = GxEPD2_426_GDEQ0426T82;
 
@@ -64,6 +66,7 @@ class X4Panel : public GxEPD2_426_GDEQ0426T82 {
     _writeCommand(0x4f);
     _writeData((HEIGHT - 1) % 256);
     _writeData((HEIGHT - 1) / 256);
+    lastFrame = bitmap;
     _writeCommand(ram);
     _startTransfer();
     _pSPIx->writeBytes(bitmap, uint32_t(WIDTH) * HEIGHT / 8);
@@ -102,8 +105,11 @@ const int OPTION_DESC_H = 66;  // with one
 const unsigned long ACTIVITY_MS = 10000;
 const unsigned long HOLD_MS = 700;  // Back held this long cancels the keyboard
 
-enum class View { None, Message, Status, List, Detail, Card, Keys, Prompts, Keyboard };
-enum class Screen { List, Detail, Card, Keys, Prompts, Keyboard };
+enum class View { None, Message, Status, List, Detail, Card, Keys, Prompts, Keyboard, Menu, Usage, Hosts, Device };
+enum class Screen { List, Detail, Card, Keys, Prompts, Keyboard, Menu, Usage, Hosts, Device };
+
+// Screens about one agent; the rest work without any.
+bool agentScreen(Screen s) { return s != Screen::List && s < Screen::Menu; }
 
 uint8_t rotation = DEFAULT_ROTATION;
 int partials = 0;
@@ -168,6 +174,16 @@ const WideKey KB_BOTTOM[4] = {{"Shift", 0, 2}, {"#+=", 2, 4}, {"space", 4, 7}, {
 String draft;
 int kbRow = 1, kbX = 0;  // kbX: unit under the selection, kept across rows
 bool kbShift = false, kbSym = false, backHoldFired = false;
+
+// The menu and its screens.
+enum { M_USAGE, M_HOSTS, M_DEVICE, M_FLIP, M_RESTART, M_COUNT };
+const char* const MENU_ITEMS[M_COUNT] = {"Usage", "Hosts", "Device", "Flip screen", "Restart"};
+int mainSel = 0;
+int hostSel = 0, hostActive = 0;
+std::vector<HostConfig> hostList;  // read when the menu opens
+int usageFirst = 0;      // first account shown
+bool usageMore = false;  // accounts below the last one shown
+bool restartAfterDraw = false;
 
 // What the agent page last drew from the live status, to redraw on change.
 String drawnInfo, drawnActivity;
@@ -370,6 +386,11 @@ void icon(const Agent& a, int cx, int cy, uint16_t fg, uint16_t bg) {
   if (a.unseen) display.fillCircle(cx, cy + 24, 5, fg);
 }
 
+String usageSummary(const Usage& u) {
+  const UsageWindow* w = u.highest();
+  return w ? ascii(w->label) + " " + String(w->used) + "%" : String();
+}
+
 void header(Gateway& gw, Agents& agents) {
   String right;
   switch (gw.state()) {
@@ -384,6 +405,12 @@ void header(Gateway& gw, Agents& agents) {
   display.setFont(F_TEXT);
   int rw = textWidth(right);
   text(W() - MARGIN - rw, 36, right, F_TEXT);
+  String use = usageSummary(gw.usage());
+  if (use.length()) {
+    display.setFont(F_SMALL);
+    rw += textWidth(use) + 16;
+    text(W() - MARGIN - rw, 35, use, F_SMALL);
+  }
   display.setFont(F_BOLD);
   text(MARGIN, 36, fit(ascii(gw.host().name), W() - 3 * MARGIN - rw), F_BOLD);
   display.fillRect(0, HEADER_H - 3, W(), 3, GxEPD_BLACK);
@@ -467,7 +494,7 @@ void drawList(Gateway& gw, Agents& agents) {
   }
 
   String pageInfo = pages > 1 ? String(page + 1) + "/" + String(pages) : String();
-  footer("", agents.size() ? "Open" : "", pages > 1 ? "Prev" : "", pages > 1 ? "Next" : "");
+  footer("Menu", agents.size() ? "Open" : "", pages > 1 ? "Prev" : "", pages > 1 ? "Next" : "");
   if (pageInfo.length()) {
     display.setFont(F_SMALL);
     text(W() - MARGIN - textWidth(pageInfo), H() - FOOTER_H - 8, pageInfo, F_SMALL);
@@ -884,7 +911,160 @@ void drawStatus(Gateway& gw, Agents& agents) {
     else y += 14;
     start = nl + 1;
   }
-  footer("", s.confirm, "", "");
+  footer("Menu", s.confirm, "", "");
+}
+
+void title(const char* s) { text(MARGIN, HEADER_H + 46, s, F_TITLE); }
+
+void drawMenu(Gateway& gw, Agents& agents) {
+  header(gw, agents);
+  title("Menu");
+  const Usage& u = gw.usage();
+  String use = usageSummary(u);
+  String host = hostActive < (int)hostList.size() ? ascii(hostList[hostActive].name) : String("None set up");
+  if (hostList.size() > 1) host += " - " + String(hostList.size()) + " hosts";
+  std::vector<String> labels(MENU_ITEMS, MENU_ITEMS + M_COUNT);
+  std::vector<String> hints = {
+      use.length() ? "Most used: " + use : u.received() ? String("No accounts reported") : String("Nothing reported yet"),
+      host,
+      "Settings page, Wi-Fi, key, battery",
+      "Turn the screen upside down",
+      "Start the X4 over",
+  };
+  menuRows(labels, hints, mainSel, HEADER_H + 70, H() - FOOTER_H - 10);
+  footer("Back", "Open", "", "");
+}
+
+String agentName(const String& agent) {
+  if (agent == "claude-code") return "Claude Code";
+  if (agent == "codex") return "Codex";
+  return ascii(agent);
+}
+
+String span(long d) {
+  if (d < 3600) return String(max(1L, d / 60)) + "m";
+  if (d < 86400) return String(d / 3600) + "h " + String(d % 3600 / 60) + "m";
+  return String(d / 86400) + "d " + String(d % 86400 / 3600) + "h";
+}
+
+void drawUsage(Gateway& gw, Agents& agents) {
+  header(gw, agents);
+  title("Usage");
+  int y = HEADER_H + 60;
+  int bottom = H() - FOOTER_H - 24;
+  const Usage& u = gw.usage();
+  const std::vector<UsageAccount>& accs = u.accounts();
+  usageFirst = constrain(usageFirst, 0, max(0, (int)accs.size() - 1));
+  usageMore = false;
+  if (accs.empty()) {
+    String host = ascii(gw.host().name);
+    String msg = gw.state() != LinkState::Online ? "Not connected to " + host + "."
+                 : u.received()                   ? "moshi-hook reports no accounts on " + host + "."
+                                                  : String("Waiting for moshi-hook to report usage.");
+    textArea(y + 10, bottom, msg + "\n\nUsage comes from the Claude Code and Codex accounts signed in on the host.",
+             F_TEXT, 30, 0);
+  }
+  time_t now = time(nullptr);
+  bool clock = now > 1700000000;
+  for (int i = usageFirst; i < (int)accs.size(); i++) {
+    const UsageAccount& a = accs[i];
+    if (i > usageFirst && y + 90 + 90 * (int)a.windows.size() > bottom) {
+      usageMore = true;
+      break;
+    }
+    y += 40;
+    String ago = age(a.capturedAt, false);
+    String right = ago.length() ? "updated " + ago + (ago == "<1m" ? "" : " ago") : String();
+    display.setFont(F_SMALL);
+    int rw = right.length() ? textWidth(right) : 0;
+    if (rw) text(W() - MARGIN - rw, y, right, F_SMALL);
+    display.setFont(F_BOLD);
+    text(MARGIN, y, fit(agentName(a.agent), W() - 3 * MARGIN - rw), F_BOLD);
+    y += 26;
+    String label = a.label;
+    label.replace("\xE2\x80\xA2", "*");  // the masked e-mail's bullets
+    display.setFont(F_SMALL);
+    text(MARGIN, y, fit(ascii(label), W() - 2 * MARGIN), F_SMALL);
+    y += 14;
+    for (const UsageWindow& w : a.windows) {
+      y += 30;
+      text(MARGIN, y, ascii(w.label), F_BOLD);
+      String pct = String(w.used) + "% used";
+      display.setFont(F_TEXT);
+      text(W() - MARGIN - textWidth(pct), y, pct, F_TEXT);
+      y += 12;
+      int bw = W() - 2 * MARGIN, bh = 18;
+      display.drawRect(MARGIN, y, bw, bh, GxEPD_BLACK);
+      display.fillRect(MARGIN + 3, y + 3, (bw - 6) * min(w.used, 100) / 100, bh - 6, GxEPD_BLACK);
+      y += bh;
+      if (clock && w.resetsAt > 0) {
+        long left = (long)(w.resetsAt - now);
+        y += 22;
+        text(MARGIN, y, left > 0 ? "resets in " + span(left) : String("resetting now"), F_SMALL);
+      }
+      y += 8;
+    }
+    y += 12;
+    display.drawFastHLine(MARGIN, y, W() - 2 * MARGIN, GxEPD_BLACK);
+  }
+  if (usageMore) {
+    display.setFont(F_SMALL);
+    text(W() - MARGIN - textWidth("more..."), bottom + 14, "more...", F_SMALL);
+  }
+  footer("Back", "", "", "");
+}
+
+void drawHosts(Gateway& gw, Agents& agents) {
+  header(gw, agents);
+  title("Hosts");
+  int top = HEADER_H + 70;
+  if (hostList.empty()) {
+    textArea(top, H() - FOOTER_H - 24,
+             "No hosts set up. Add them on the settings page:\n\nhttp://" + WiFi.localIP().toString(), F_TEXT, 30, 0);
+    footer("Back", "", "", "");
+    return;
+  }
+  std::vector<String> labels, hints;
+  for (int i = 0; i < (int)hostList.size(); i++) {
+    const HostConfig& h = hostList[i];
+    labels.push_back(ascii(h.name.length() ? h.name : h.address));
+    String hint = ascii(h.user + "@" + h.address);
+    if (h.port != 22) hint += ":" + String(h.port);
+    if (i == hostActive) hint += gw.state() == LinkState::Online ? " - connected" : " - current";
+    hints.push_back(hint);
+  }
+  menuRows(labels, hints, hostSel, top, H() - FOOTER_H - 10);
+  bool current = hostSel == hostActive;
+  footer("Back", !current ? "Connect" : gw.state() != LinkState::Online ? "Retry" : "", "", "");
+}
+
+void drawDevice(Gateway& gw, Agents& agents) {
+  header(gw, agents);
+  title("Device");
+  int y = HEADER_H + 60;
+  auto row = [&](const char* label, const String& value, const GFXfont* font, int lineH) {
+    y += 30;
+    text(MARGIN, y, label, F_SMALL);
+    y += lineH - 4;
+    display.setFont(font);
+    for (const String& line : wrap(value, W() - 2 * MARGIN, 3)) {
+      text(MARGIN, y, line, font);
+      y += lineH;
+    }
+    y -= lineH;
+  };
+  row("Settings page", String("http://") + config_server::HOSTNAME + ".local", F_TEXT, 30);
+  y += 30;
+  text(MARGIN, y, "http://" + WiFi.localIP().toString(), F_TEXT);
+  row("Wi-Fi", ascii(WiFi.SSID()) + "  (" + String(WiFi.RSSI()) + " dBm)", F_TEXT, 30);
+  row("Device key", gw.deviceKeyFingerprint(), F_SMALL, 24);
+  float volts = analogReadMilliVolts(PIN_BATTERY_ADC) * BATTERY_DIVIDER / 1000.0f;
+  row("Battery", String(volts, 2) + " V", F_TEXT, 30);
+  row("Memory", String(ESP.getFreeHeap() / 1024) + " KB free, lowest " + String(ESP.getMinFreeHeap() / 1024) + " KB",
+      F_TEXT, 30);
+  row("Running for", span(millis() / 1000), F_TEXT, 30);
+  row("Firmware", "built " __DATE__, F_TEXT, 30);
+  footer("Back", "", "", "");
 }
 
 void clampCursor(Agents& agents) {
@@ -1006,7 +1186,7 @@ void steerWatch(Gateway& gw, Agents& agents) {
   const Agent* target = nullptr;
   bool automatic = false;
   int sel = agents.indexOf(selectedId);
-  if (screen != Screen::List && sel >= 0) {
+  if (agentScreen(screen) && sel >= 0) {
     target = &agents[sel];
   } else {
     std::vector<int> waiting = agents.waitingOrder();
@@ -1023,7 +1203,7 @@ void steerWatch(Gateway& gw, Agents& agents) {
   }
   if (!automatic) return;
 
-  if (gw.cardPending() && !target->dismissed) {  // take over the list
+  if (screen == Screen::List && gw.cardPending() && !target->dismissed) {  // take over the list
     selectedId = target->id;
     cursor = agents.indexOf(selectedId);
     openCard(Screen::List);
@@ -1062,9 +1242,9 @@ void openKeyboard(const String& text) {
   screen = Screen::Keyboard;
 }
 
-bool menuMove(Buttons& b, int count) {
-  if (b.wasPressed(BTN_DOWN)) menuSel = min(menuSel + 1, count - 1);
-  else if (b.wasPressed(BTN_UP)) menuSel = max(menuSel - 1, 0);
+bool menuMove(Buttons& b, int count, int& sel = menuSel) {
+  if (b.wasPressed(BTN_DOWN)) sel = min(sel + 1, count - 1);
+  else if (b.wasPressed(BTN_UP)) sel = max(sel - 1, 0);
   else return false;
   return true;
 }
@@ -1176,10 +1356,80 @@ bool keyboardInput(Buttons& b) {
   return true;
 }
 
+void openMenu() {
+  hostList = settings::hosts();
+  hostActive = settings::activeHost();
+  screen = Screen::Menu;
+}
+
+bool menuInput(Buttons& b) {
+  if (b.wasPressed(BTN_BACK)) {
+    screen = Screen::List;
+    return true;
+  }
+  if (menuMove(b, M_COUNT, mainSel)) return true;
+  if (!b.wasPressed(BTN_CONFIRM)) return false;
+  switch (mainSel) {
+    case M_USAGE:
+      usageFirst = 0;
+      screen = Screen::Usage;
+      break;
+    case M_HOSTS:
+      hostSel = hostActive;
+      screen = Screen::Hosts;
+      break;
+    case M_DEVICE: screen = Screen::Device; break;
+    case M_FLIP:
+      rotation = rotation == 1 ? 3 : 1;
+      settings::saveRotation(rotation);
+      lastView = View::None;  // redraw all of it, the other way up
+      break;
+    case M_RESTART:
+      restartAfterDraw = true;
+      showNotice("Restarting...");
+      break;
+  }
+  return true;
+}
+
+bool usageInput(Buttons& b) {
+  if (b.wasPressed(BTN_BACK)) screen = Screen::Menu;
+  else if (b.wasPressed(BTN_DOWN) && usageMore) usageFirst++;
+  else if (b.wasPressed(BTN_UP) && usageFirst > 0) usageFirst--;
+  else return false;
+  return true;
+}
+
+bool hostsInput(Gateway& gw, Buttons& b) {
+  if (b.wasPressed(BTN_BACK)) {
+    screen = Screen::Menu;
+    return true;
+  }
+  if (hostList.empty()) return false;
+  if (menuMove(b, hostList.size(), hostSel)) return true;
+  if (!b.wasPressed(BTN_CONFIRM)) return false;
+  if (hostSel != hostActive) {
+    gw.switchHost(hostSel);
+    hostActive = hostSel;
+    selectedId = "";
+    cursor = 0;
+  } else if (gw.state() != LinkState::Online) {
+    gw.retryNow();
+  } else {
+    return false;
+  }
+  screen = Screen::List;
+  return true;
+}
+
 // Returns true if the input changed what is on screen.
 bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
   switch (view) {
     case View::Status:
+      if (b.wasPressed(BTN_BACK)) {
+        openMenu();
+        return true;
+      }
       if (b.wasPressed(BTN_CONFIRM)) {
         if (gw.state() == LinkState::HostKeyUnknown) gw.trustHostKey();
         else gw.retryNow();
@@ -1188,7 +1438,8 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
       return false;
     case View::List: {
       int per = rowsPerPage();
-      if (b.wasPressed(BTN_DOWN)) moveCursor(agents, 1);
+      if (b.wasPressed(BTN_BACK)) openMenu();
+      else if (b.wasPressed(BTN_DOWN)) moveCursor(agents, 1);
       else if (b.wasPressed(BTN_UP)) moveCursor(agents, -1);
       else if (b.wasPressed(BTN_RIGHT)) moveCursor(agents, per - cursor % per);
       else if (b.wasPressed(BTN_LEFT)) moveCursor(agents, -(cursor % per) - (cursor >= per ? per : 0));
@@ -1223,6 +1474,13 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
     case View::Keys: return keysInput(b);
     case View::Prompts: return promptsInput(b);
     case View::Keyboard: return keyboardInput(b);
+    case View::Menu: return menuInput(b);
+    case View::Usage: return usageInput(b);
+    case View::Hosts: return hostsInput(gw, b);
+    case View::Device:
+      if (!b.wasPressed(BTN_BACK)) return false;
+      screen = Screen::Menu;
+      return true;
     default: return false;
   }
 }
@@ -1235,6 +1493,32 @@ void begin() {
   // The library's default is 4 MHz; the SSD1677 takes writes at up to 20.
   display.init(0, true, 10, false, SPI, SPISettings(20000000, MSBFIRST, SPI_MODE0));
   display.epd2.setBusyCallback(busyPoll);
+}
+
+void dumpScreen() {
+  const uint8_t* f = X4Panel::lastFrame;
+  if (!f) {
+    Serial.println("SHOT none");
+    return;
+  }
+  static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const size_t n = size_t(X4Panel::WIDTH) * X4Panel::HEIGHT / 8;
+  Serial.printf("SHOT %d %d %d\n", X4Panel::WIDTH, X4Panel::HEIGHT, rotation);
+  char line[81];
+  int len = 0;
+  for (size_t i = 0; i < n; i += 3) {
+    uint32_t v = f[i] << 16 | (i + 1 < n ? f[i + 1] << 8 : 0) | (i + 2 < n ? f[i + 2] : 0);
+    line[len++] = B64[v >> 18 & 63];
+    line[len++] = B64[v >> 12 & 63];
+    line[len++] = i + 1 < n ? B64[v >> 6 & 63] : '=';
+    line[len++] = i + 2 < n ? B64[v & 63] : '=';
+    if (len == 80 || i + 3 >= n) {
+      line[len] = 0;
+      Serial.println(line);
+      len = 0;
+    }
+  }
+  Serial.println("END");
 }
 
 void message(const String& title, const String& body) {
@@ -1263,6 +1547,13 @@ void message(const String& title, const String& body) {
 }
 
 View viewFor(LinkState st, Agents& agents) {
+  switch (screen) {
+    case Screen::Menu: return View::Menu;
+    case Screen::Usage: return View::Usage;
+    case Screen::Hosts: return View::Hosts;
+    case Screen::Device: return View::Device;
+    default: break;
+  }
   bool reconnecting = (st == LinkState::Waiting || st == LinkState::Connecting) && agents.loaded();
   if (st != LinkState::Online && !reconnecting) return View::Status;
   switch (screen) {
@@ -1276,8 +1567,9 @@ View viewFor(LinkState st, Agents& agents) {
 }
 
 void update(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
+  buttons.setSwapUpDown(rotation == 1);
   clampCursor(agents);
-  if (screen != Screen::List && agents.indexOf(selectedId) < 0) screen = Screen::List;  // the tab closed
+  if (agentScreen(screen) && agents.indexOf(selectedId) < 0) screen = Screen::List;  // the tab closed
   steerWatch(gw, agents);
 
   if (screen == Screen::Detail && gw.cardPending() && gw.watchedId() == selectedId &&
@@ -1370,6 +1662,10 @@ void update(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
     case View::Keys: draw(drawKeys); break;
     case View::Prompts: draw(drawPrompts); break;
     case View::Keyboard: draw(drawKeyboard); break;
+    case View::Menu: draw(drawMenu); break;
+    case View::Usage: draw(drawUsage); break;
+    case View::Hosts: draw(drawHosts); break;
+    case View::Device: draw(drawDevice); break;
     default: draw(drawStatus); break;
   }
   lastView = view;
@@ -1382,6 +1678,12 @@ void update(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
   // Keep what was pressed during the refresh only if it was pressed at this
   // same screen (see the replay above).
   buttons.endCapture(!changedView && view != View::Card && sendAfterDraw == Send::None);
+
+  if (restartAfterDraw) {
+    Serial.println("[ui] restart from the menu");
+    delay(200);
+    ESP.restart();
+  }
 
   if (sendAfterDraw != Send::None) {
     Send what = sendAfterDraw;

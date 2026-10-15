@@ -57,7 +57,8 @@ body{font-family:-apple-system,system-ui,sans-serif;max-width:560px;margin:2em a
 h1{font-size:1.4em}h2{font-size:1.1em;margin-top:1.6em;border-bottom:1px solid #ccc}
 label{display:block;margin:.7em 0 .2em;font-weight:600}
 input,select,textarea{width:100%;box-sizing:border-box;padding:.45em;font-size:1em}
-input[type=checkbox]{width:auto}
+input[type=checkbox],input[type=radio]{width:auto}
+fieldset{border:1px solid #ccc;padding:0 1em 1em}legend{font-weight:600}
 textarea{font-family:ui-monospace,monospace;font-size:.8em}
 .hint{color:#555;font-size:.9em}button{margin-top:1.5em;padding:.6em 1.4em;font-size:1em}
 </style>)";
@@ -75,13 +76,13 @@ void sendPage(const String& body) {
 void handleRoot() {
   if (!authorized()) return;
   WifiConfig wifi = settings::loadWifi();
-  HostConfig host = settings::loadHost();
-  String fp = settings::pinnedHostKey();
+  std::vector<HostConfig> hosts = settings::hosts();
+  int active = settings::activeHost();
   uint8_t rot = settings::rotation();
   bool hasPw = settings::webPassword().length() > 0;
 
   String b;
-  b.reserve(4096);
+  b.reserve(9000);
   b += F("<form method=post action=/save>");
 
   b += F("<h2>Wi-Fi</h2><label>Network</label><input name=w_ssid list=nets required value='");
@@ -92,21 +93,37 @@ void handleRoot() {
   b += wifi.ssid.length() ? F("unchanged") : F("");
   b += F("'>");
 
-  b += F("<h2>Host</h2><p class=hint>A machine running moshi-hook, reached over SSH.</p>"
-         "<label>Name</label><input name=h_name maxlength=24 value='");
-  b += esc(host.name);
-  b += F("'><label>Address</label><input name=h_addr maxlength=64 placeholder='192.168.1.20 or laptop.local' value='");
-  b += esc(host.address);
-  b += F("'><label>SSH port</label><input name=h_port type=number min=1 max=65535 value='");
-  b += String(host.port);
-  b += F("'><label>SSH user</label><input name=h_user maxlength=32 value='");
-  b += esc(host.user);
-  b += F("'><label>Host key</label><div class=hint>");
-  if (fp.length()) {
-    b += esc(fp);
-    b += F("</div><label><input type=checkbox name=forget_fp> Forget pinned host key</label>");
-  } else {
-    b += F("Not pinned yet: trusted on first connection.</div>");
+  b += F("<h2>Hosts</h2><p class=hint>Machines running moshi-hook, reached over SSH. Switch between them "
+         "from the X4's menu. Clear an address to remove a host.</p>");
+  for (int i = 0; i < (int)settings::MAX_HOSTS; i++) {
+    HostConfig h = i < (int)hosts.size() ? hosts[i] : HostConfig();
+    String k = "h" + String(i) + "_";
+    b += F("<fieldset style='margin-top:1em'><legend>Host ");
+    b += String(i + 1);
+    b += F("</legend><label><input type=radio name=h_active value=");
+    b += String(i);
+    if (i == active) b += F(" checked");
+    b += F("> Connect to this one</label><label>Name</label><input name=");
+    b += k + F("name maxlength=24 value='");
+    b += esc(h.name);
+    b += F("'><label>Address</label><input name=");
+    b += k + F("addr maxlength=64 placeholder='192.168.1.20 or laptop.local' value='");
+    b += esc(h.address);
+    b += F("'><label>SSH port</label><input name=");
+    b += k + F("port type=number min=1 max=65535 value='");
+    b += String(h.port);
+    b += F("'><label>SSH user</label><input name=");
+    b += k + F("user maxlength=32 value='");
+    b += esc(h.user);
+    b += F("'><label>Host key</label><div class=hint>");
+    if (h.hostKey.length()) {
+      b += esc(h.hostKey);
+      b += F("</div><label><input type=checkbox name=");
+      b += k + F("forget> Forget pinned host key</label>");
+    } else {
+      b += F("Not pinned yet: trusted on first connection.</div>");
+    }
+    b += F("</fieldset>");
   }
 
   b += F("<h2>Device key</h2><p class=hint>Append this line to <code>~/.ssh/authorized_keys</code> on each host. "
@@ -228,18 +245,33 @@ void handleSave() {
   }
   settings::saveWifi(wifi);
 
-  HostConfig host;
-  host.name = server.arg("h_name");
-  host.name.trim();
-  host.address = server.arg("h_addr");
-  host.address.trim();
-  long port = server.arg("h_port").toInt();
-  host.port = (port > 0 && port <= 65535) ? port : 22;
-  host.user = server.arg("h_user");
-  host.user.trim();
-  if (host.name.isEmpty()) host.name = host.address;
-  settings::saveHost(host);
-  if (server.hasArg("forget_fp")) settings::forgetHostKey();
+  // Slot i of the form shows hosts()[i]. A pin survives only while the slot
+  // still points at the same machine: another one has a different host key,
+  // and keeping the old pin would make it look like a man-in-the-middle.
+  std::vector<HostConfig> oldHosts = settings::hosts();
+  std::vector<HostConfig> hosts;
+  int activeSlot = server.arg("h_active").toInt(), active = 0;
+  for (int i = 0; i < (int)settings::MAX_HOSTS; i++) {
+    String k = "h" + String(i) + "_";
+    HostConfig h;
+    h.address = server.arg(k + "addr");
+    h.address.trim();
+    if (h.address.isEmpty()) continue;
+    h.name = server.arg(k + "name");
+    h.name.trim();
+    if (h.name.isEmpty()) h.name = h.address;
+    long port = server.arg(k + "port").toInt();
+    h.port = (port > 0 && port <= 65535) ? port : 22;
+    h.user = server.arg(k + "user");
+    h.user.trim();
+    if (i < (int)oldHosts.size() && oldHosts[i].address == h.address && oldHosts[i].port == h.port &&
+        !server.hasArg(k + "forget"))
+      h.hostKey = oldHosts[i].hostKey;
+    if (i == activeSlot) active = hosts.size();
+    hosts.push_back(h);
+  }
+  settings::saveHosts(hosts);
+  settings::saveActiveHost(active);
 
   settings::saveRotation(server.arg("rotation").toInt() == 1 ? 1 : 3);
   if (server.hasArg("prompts")) settings::savePrompts(server.arg("prompts"));
@@ -250,8 +282,8 @@ void handleSave() {
     settings::saveWebPassword(server.arg("web_pw"));
   }
 
-  Serial.printf("Saved settings: Wi-Fi \"%s\", host %s@%s:%u; restarting.\n", wifi.ssid.c_str(),
-                host.user.c_str(), host.address.c_str(), host.port);
+  Serial.printf("Saved settings: Wi-Fi \"%s\", %u hosts; restarting.\n", wifi.ssid.c_str(),
+                (unsigned)hosts.size());
   sendPage(String(F("<p>Saved. Restarting&hellip;</p><p class=hint>The settings page will be at "
                     "<a href='http://")) +
            HOSTNAME + F(".local/'>http://") + HOSTNAME + F(".local</a> once the X4 joins ") + esc(wifi.ssid) +

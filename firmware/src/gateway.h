@@ -6,6 +6,7 @@
 #include "card.h"
 #include "settings.h"
 #include "ssh_link.h"
+#include "usage.h"
 #include "ws.h"
 
 enum class LinkState {
@@ -40,6 +41,13 @@ class Gateway {
   const String& detail() const { return detail_; }
   const String& fingerprint() const { return link_.fingerprint(); }
   unsigned long retryIn() const;  // ms until the next attempt, in Waiting
+
+  // Drop the current host and connect to settings::hosts()[index], making it
+  // the one used from now on.
+  void switchHost(int index);
+  const Usage& usage() const { return usage_; }
+  // The X4's own key, "SHA256:...".
+  const String& deviceKeyFingerprint() const { return deviceFp_; }
 
   // Pin the shown host key and connect.
   void trustHostKey();
@@ -78,6 +86,8 @@ class Gateway {
   Agents& agents_;
   ssh_key key_ = nullptr;
   HostConfig host_;
+  String deviceFp_;
+  Usage usage_;
   SshLink link_;
   WsClient ws_;
   Card card_;

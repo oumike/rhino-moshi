@@ -25,6 +25,17 @@ ssh_key loadOrCreateDeviceKey() {
   return key;
 }
 
+String keyFingerprint(ssh_key key) {
+  unsigned char* hash = nullptr;
+  size_t len = 0;
+  if (ssh_get_publickey_hash(key, SSH_PUBLICKEY_HASH_SHA256, &hash, &len) != SSH_OK) return String();
+  char* fp = ssh_get_fingerprint_hash(SSH_PUBLICKEY_HASH_SHA256, hash, len);
+  ssh_clean_pubkey_hash(&hash);
+  String out = fp ? fp : "";
+  ssh_string_free_char(fp);
+  return out;
+}
+
 String authorizedKeysLine(ssh_key key) {
   char* pub = nullptr;
   if (ssh_pki_export_pubkey_base64(key, &pub) != SSH_OK) return String();

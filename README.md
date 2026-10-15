@@ -46,8 +46,9 @@ opens a tunnel (an SSH `direct-tcpip` channel, the same thing `ssh -W` does) to
    only the gateway tunnel, and `command="false"` makes any attempt to run a
    shell or command exit immediately. Requires OpenSSH 7.2+. A stolen X4 can do what the X4 already
    does, and nothing more. To revoke it, delete the line.
-3. **Add the host on the X4:** a name, address, SSH port and user, entered in
-   the settings page or with the on-screen keyboard.
+3. **Add the host on the X4:** a name, address, SSH port and user, entered on
+   the settings page. Up to four hosts can be set up; Menu → Hosts on the X4
+   switches between them.
 4. **Confirm the host key** on first connect. The X4 shows the host's SHA256
    fingerprint. Compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
    on the host, then press Trust. The key is pinned. If it later changes, the
@@ -74,7 +75,7 @@ opens a tunnel (an SSH `direct-tcpip` channel, the same thing `ssh -W` does) to
 | An `/events` agent watch follows **one agent session**. | The device re-points its single agent watch at whichever agent needs it most (see below). |
 | E-paper: ~1.7 s full refresh, partial refresh for small regions. | Redraws only when something a human cares about changes. Ephemeral "Thinking… (12s)" lines are throttled. |
 | Six usable buttons plus power, no touch. | List navigation plus contextual soft keys. Typing uses an on-screen keyboard. |
-| No discovery protocol in moshi-hook. | Hosts are configured on the device through the settings page or the on-screen keyboard. |
+| No discovery protocol in moshi-hook. | Hosts are configured on the device through the settings page. |
 
 ## How the firmware uses the gateway
 
@@ -154,8 +155,9 @@ from `main`. It adds:
   (Alternative: a loopback listener on the X4 that relays to the channel, so
   stock libraries work unchanged. The spike decides.)
 - **Settings page:** a plain web page at `http://rhino-x4.local` on the LAN.
-  It handles Wi-Fi credentials, shows the `authorized_keys` line, takes host
-  entries (name, address, port, user), shows and forgets the pinned host key,
+  It handles Wi-Fi credentials, shows the `authorized_keys` line, takes up to
+  four host entries (name, address, port, user) and which one to connect to,
+  shows and forgets each host's pinned key,
   sets orientation (portrait by default), edits the canned prompts (one per
   line, up to 20 of 300 characters), and sets an optional page password
   (HTTP Basic auth, user `admin`; none by default).
@@ -165,7 +167,8 @@ from `main`. It adds:
   there yourself. Saving restarts the X4 onto the saved network.
 - **Backup/restore:** the settings page downloads and restores a JSON backup
   in the browser, and writes or reads one on the SD card at
-  `/moshi/rhino-x4-backup.json`. A backup holds every setting, including the
+  `/moshi/rhino-x4-backup.json`. A backup holds every setting (all hosts in
+  `hosts`, plus the active one in `host` for older firmware), including the
   Wi-Fi and page passwords and the X4's SSH private key, so a restored X4
   needs no re-authorizing on hosts. The file must be kept private.
 
@@ -174,7 +177,7 @@ from `main`. It adds:
 ```
  Agents (home)                 Card                          Agent detail
 ┌────────────────────────┐   ┌────────────────────────┐   ┌────────────────────────┐
-│ laptop      ●  5h 42%  │   │ laptop    1 of 3 ⧗ 5m  │   │ app-moshi / 1   claude │
+│ laptop   5h 42% online │   │ laptop    1 of 3 ⧗ 5m  │   │ app-moshi / 1   claude │
 │────────────────────────│   │────────────────────────│   │ Fix login redirect     │
 │▶! app-moshi  claude 5m │   │ app-moshi · claude     │   │ opus · 42% context left│
 │   Fix login redirect   │   │ Bash                   │   │────────────────────────│
@@ -183,13 +186,16 @@ from `main`. It adds:
 │ ✓•docs       claude 2h │   │                        │   │                        │
 │ · scratch    shell     │   │                        │   │                        │
 ├────────────────────────┤   ├────────────────────────┤   ├────────────────────────┤
-│ Hosts│ Open │ Usage│Menu│   │ Back │ Deny │Approve│  │   │ Back │Answer│Keys│Prompt│
+│ Menu │ Open │ Prev│Next │   │ Back │ Deny │Approve│  │   │ Back │Answer│Keys│Prompt│
 └────────────────────────┘   └────────────────────────┘   └────────────────────────┘
 ```
 
 - **Agents:** sorted attention-first (blocked, then done, then by
   `statusChangedAt`). An agent that finishes is re-sorted and marked unseen
-  (`•`) until you open it. There's no pop-up.
+  (`•`) until you open it. There's no pop-up. The header shows the host, its
+  most-used rate-limit window and the connection state. Back opens the Menu
+  (also from the connection status screen, so you can switch away from an
+  unreachable host).
 - **Card:** takes over from the agents list or detail when the watched agent
   has a pending request, unless dismissed. Back dismisses it until the agent
   blocks again (Confirm on the agent reopens it). Right jumps to the next
@@ -215,14 +221,21 @@ from `main`. It adds:
   symbols layer, space and Send. Up/Down change rows, Left/Right move along a
   row (both wrap), Confirm types, Back deletes, and holding Back cancels.
   Meant for short prompts.
-- **Hosts:** configured hosts with their state (connected, unreachable, key
-  not authorized, host key changed). Confirm switches hosts, closing the
-  current SSH session first. A new host shows its fingerprint for Trust or
-  Cancel.
-- **Usage:** per-agent rate-limit windows with reset times.
-- **Settings:** hosts, canned prompts, open
-  the settings page, show the X4's key fingerprint, regenerate the key (every
-  host must re-authorize), and reset Wi-Fi.
+- **Menu:** Usage, Hosts, Device, Flip screen and Restart. Cards don't take
+  over the Menu and its screens.
+- **Usage:** each account moshi-hook reports (agent, masked account label,
+  when it was captured), with every window's use as a bar and its reset time.
+  Up/Down scroll when there are more accounts than fit.
+- **Hosts:** the configured hosts, marking the current one. Confirm switches,
+  closing the current SSH session first and remembering the choice; on the
+  current host it retries a failed connection. A new host shows its
+  fingerprint for Trust.
+- **Device:** settings page address, Wi-Fi network and signal, the X4's key
+  fingerprint, battery voltage, free memory, uptime and build date.
+- **Flip screen** turns the display upside down (saved; also on the settings
+  page). Up/Down swap with it, so Up stays the upper key.
+- Not on the device: regenerating the key (every host would have to
+  re-authorize) and changing Wi-Fi, which is setup mode (Back held at boot).
 
 ### Refresh policy
 
@@ -237,6 +250,14 @@ from `main`. It adds:
 - Ephemeral status lines update at most every 10 s.
 - Wi-Fi stays associated while connected. USB power is expected for all-day
   use.
+
+### Serial debugging
+
+Over USB serial (115200), single characters drive the X4 without touching it:
+`b` `c` `l` `r` `u` `d` press Back, Confirm, Left, Right, Up and Down, `h`
+holds Back for a second, and `s` dumps the screen as base64 between
+`SHOT <width> <height> <rotation>` and `END` (the panel's native 800×480
+frame, 1 bit per pixel, set bits white).
 
 ## Risks to verify early
 
@@ -263,7 +284,7 @@ from `main`. It adds:
    agents list and a read-only agent detail.
 3. ✅ **Cards:** approve/deny, plan, question.
 4. ✅ **Detail, keys and prompts:** canned prompts, then the on-screen keyboard.
-5. **Usage**, host switching, settings, refresh tuning.
+5. ✅ **Usage**, host switching, menu and device info, refresh tuning.
 
 ## Decisions
 
@@ -275,6 +296,6 @@ from `main`. It adds:
 - **Multiple machines:** each runs its own moshi-hook. The device connects to
   one at a time and switches between them.
 - **Finished agents:** re-sorted and marked as unseen, with no pop-up.
-- **Rotation:** on the settings page. **Button calibration:** none on the
+- **Rotation:** on the settings page or Menu → Flip screen. **Button calibration:** none on the
   device; the ladder thresholds in `board.h` are measured on hardware.
   `docs/flashing.md` must drop the old `rhino-companion` CLI commands.

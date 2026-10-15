@@ -4,12 +4,13 @@
 
 #include <vector>
 
-// One SSH host the X4 can connect to. Stored in NVS; edited in the setup portal.
+// One SSH host the X4 can connect to. Stored in NVS; edited on the settings page.
 struct HostConfig {
   String name;
   String address;
   uint16_t port = 22;
   String user;
+  String hostKey;  // pinned SHA256 fingerprint ("SHA256:..."), empty until first use
 
   bool isComplete() const { return address.length() && user.length() && port; }
 };
@@ -34,10 +35,18 @@ void saveRotation(uint8_t rotation);
 String webPassword();
 void saveWebPassword(const String& password);
 
-HostConfig loadHost();
-void saveHost(const HostConfig& host);
+// The hosts, in order (those with an address), and which one to connect to.
+const size_t MAX_HOSTS = 4;
+std::vector<HostConfig> hosts();
+// Stores the list as given, pins included.
+void saveHosts(const std::vector<HostConfig>& hosts);
+int activeHost();  // index into hosts(); 0 when there are none
+void saveActiveHost(int index);
 
-// Pinned SHA256 host-key fingerprint ("SHA256:..."), empty until first use.
+// The active host; empty if none.
+HostConfig loadHost();
+
+// The active host's pinned key.
 String pinnedHostKey();
 void pinHostKey(const String& fingerprint);
 void forgetHostKey();

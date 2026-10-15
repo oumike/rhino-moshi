@@ -63,53 +63,99 @@ void saveWebPassword(const String& password) {
   p.end();
 }
 
-HostConfig loadHost() {
+// Hosts live in slots h0_* .. h3_*, counted by h_count. Firmware before that
+// kept one host in h_name/h_addr/h_port/h_user/h_fp: read as slot 0 until the
+// first save converts it.
+std::vector<HostConfig> hosts() {
   Preferences p;
   p.begin(NS, true);
-  HostConfig h;
-  h.name = str(p, "h_name");
-  h.address = str(p, "h_addr");
-  h.port = p.getUShort("h_port", 22);
-  h.user = str(p, "h_user");
+  std::vector<HostConfig> out;
+  if (!p.isKey("h_count")) {
+    HostConfig h;
+    h.name = str(p, "h_name");
+    h.address = str(p, "h_addr");
+    h.port = p.getUShort("h_port", 22);
+    h.user = str(p, "h_user");
+    h.hostKey = str(p, "h_fp");
+    if (h.address.length()) out.push_back(h);
+  } else {
+    int n = min((int)p.getUChar("h_count", 0), (int)MAX_HOSTS);
+    for (int i = 0; i < n; i++) {
+      String k = "h" + String(i) + "_";
+      HostConfig h;
+      h.name = str(p, (k + "name").c_str());
+      h.address = str(p, (k + "addr").c_str());
+      h.port = p.getUShort((k + "port").c_str(), 22);
+      h.user = str(p, (k + "user").c_str());
+      h.hostKey = str(p, (k + "fp").c_str());
+      if (h.address.length()) out.push_back(h);
+    }
+  }
   p.end();
-  return h;
+  return out;
 }
 
-void saveHost(const HostConfig& host) {
-  HostConfig old = loadHost();
+void saveHosts(const std::vector<HostConfig>& list) {
+  std::vector<HostConfig> keep;
+  for (const HostConfig& h : list)
+    if (h.address.length() && keep.size() < MAX_HOSTS) keep.push_back(h);
   Preferences p;
   p.begin(NS, false);
-  p.putString("h_name", host.name);
-  p.putString("h_addr", host.address);
-  p.putUShort("h_port", host.port);
-  p.putString("h_user", host.user);
-  // A different machine has a different host key; keeping the old pin would
-  // make the new host look like a man-in-the-middle.
-  if (old.address != host.address || old.port != host.port) p.remove("h_fp");
+  for (int i = 0; i < (int)MAX_HOSTS; i++) {
+    String k = "h" + String(i) + "_";
+    if (i < (int)keep.size()) {
+      const HostConfig& h = keep[i];
+      p.putString((k + "name").c_str(), h.name);
+      p.putString((k + "addr").c_str(), h.address);
+      p.putUShort((k + "port").c_str(), h.port);
+      p.putString((k + "user").c_str(), h.user);
+      p.putString((k + "fp").c_str(), h.hostKey);
+    } else {
+      for (const char* f : {"name", "addr", "port", "user", "fp"})
+        if (p.isKey((k + f).c_str())) p.remove((k + f).c_str());
+    }
+  }
+  // Only once the slots are written, so a reset midway still finds the old host.
+  p.putUChar("h_count", keep.size());
+  for (const char* legacy : {"h_name", "h_addr", "h_port", "h_user", "h_fp"})
+    if (p.isKey(legacy)) p.remove(legacy);
+  if (p.getUChar("h_active", 0) >= keep.size()) p.putUChar("h_active", 0);
   p.end();
 }
 
-String pinnedHostKey() {
+int activeHost() {
   Preferences p;
   p.begin(NS, true);
-  String fp = str(p, "h_fp");
+  int i = p.getUChar("h_active", 0);
   p.end();
-  return fp;
+  int n = hosts().size();
+  return i < n ? i : 0;
 }
+
+void saveActiveHost(int index) {
+  Preferences p;
+  p.begin(NS, false);
+  p.putUChar("h_active", max(0, index));
+  p.end();
+}
+
+HostConfig loadHost() {
+  std::vector<HostConfig> list = hosts();
+  int i = activeHost();
+  return i < (int)list.size() ? list[i] : HostConfig();
+}
+
+String pinnedHostKey() { return loadHost().hostKey; }
 
 void pinHostKey(const String& fingerprint) {
-  Preferences p;
-  p.begin(NS, false);
-  p.putString("h_fp", fingerprint);
-  p.end();
+  std::vector<HostConfig> list = hosts();
+  int i = activeHost();
+  if (i >= (int)list.size()) return;
+  list[i].hostKey = fingerprint;
+  saveHosts(list);
 }
 
-void forgetHostKey() {
-  Preferences p;
-  p.begin(NS, false);
-  p.remove("h_fp");
-  p.end();
-}
+void forgetHostKey() { pinHostKey(""); }
 
 const char* DEFAULT_PROMPTS =
     "Continue\n"

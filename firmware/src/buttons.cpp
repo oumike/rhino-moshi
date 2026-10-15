@@ -35,6 +35,7 @@ uint16_t Buttons::readState() {
 
   rawAdc2_ = readAdc16(PIN_BUTTON_ADC_2);
   int8_t b2 = decodeLadder(rawAdc2_, BUTTON_ADC_2_RANGES, BUTTON_ADC_2_COUNT);
+  if (b2 >= 0 && swapUpDown_) b2 = 1 - b2;
   if (b2 >= 0) state |= (1 << (b2 + 4));  // ladder 2 starts at BTN_UP
 
   if (digitalRead(PIN_BUTTON_POWER) == LOW) state |= (1 << BTN_POWER);
@@ -89,6 +90,22 @@ void Buttons::update() {
   pressedEvents_ = 0;
   releasedEvents_ = 0;
   replaying_ = false;
+
+  if (!capturing_ && !queueLen_) {
+    if (injectRelease_) {
+      releasedEvents_ = injectRelease_;
+      injectRelease_ = 0;
+      replaying_ = true;  // so heldTime() reports the injected hold
+      replayHeld_ = injectHeld_;
+      return;
+    }
+    if (injectPress_) {
+      pressedEvents_ = injectPress_;
+      injectRelease_ = injectPress_;
+      injectPress_ = 0;
+      return;
+    }
+  }
 
   // Inside the post-refresh settling window, keep the baseline following the
   // reading but refuse to emit events. A rail still recovering from a refresh
