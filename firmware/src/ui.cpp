@@ -1182,7 +1182,7 @@ void drawHome(Gateway& gw, Agents& agents) {
     char mem[24];
     snprintf(mem, sizeof(mem), "%.1f/%.0fG", st.memUsedMB / 1024.0f, st.memTotalMB / 1024.0f);
     float frac = st.memTotalMB ? (float)st.memUsedMB / st.memTotalMB : 0;
-    bar(VX, frac, mem, color::FG, frac >= 0.95f);
+    bar(VX, frac, mem, color::FG, false);  // macOS counts its cache as used, so it always looks full
   } else {
     value(st.tried ? st.error : String("reading..."), st.tried ? color::BLOCKED : color::MUTED);
     if (st.tried) {
@@ -1289,7 +1289,7 @@ void drawHome(Gateway& gw, Agents& agents) {
     snprintf(v, sizeof(v), "%ddBm %.2fV up %s", (int)WiFi.RSSI(), volts, span(millis() / 1000).c_str());
     String s = v;
 #if HAS_HOST_STATS
-    if (st.tried && st.rttMs) s += " " + String(st.rttMs) + "ms";
+    if (st.tried && st.rttMs) s += " rtt " + String(st.rttMs) + "ms";
 #endif
     value(s);
   }
