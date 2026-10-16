@@ -261,7 +261,7 @@ Over USB serial (115200), single characters drive the X4 without touching it:
 `b` `c` `l` `r` `u` `d` press Back, Confirm, Left, Right, Up and Down, `h`
 holds Back for a second, and `s` dumps the screen as base64 between
 `SHOT <width> <height> <rotation>` and `END` (the panel's native 800×480
-frame, 1 bit per pixel, set bits white). `m` presses Home (the M9's key), and
+frame, 1 bit per pixel, set bits white). `m` presses Home and `g` the far-left Messages key (the M9's), and
 text between double quotes is typed as if on a keyboard. On the M9, `s` dumps
 `SHOT565 320 240` instead: RGB565, little-endian.
 
@@ -272,7 +272,8 @@ a 320×240 ST7789 TFT and an I2C QWERTY keyboard). The parts that differ sit
 behind seams:
 
 - `include/boards/x4.h` and `boards/m9.h` hold the pins; `board.h` picks one
-  and defines the shared buttons (Back … Power, plus Home).
+  and defines the shared buttons (Back … Power, plus the M9's Home, Messages
+  and the two keys under them).
 - `src/panel.h` is the screen: GxEPD2 on the X4, a minimal ST7789 driver
   drawing a PSRAM canvas on the M9. Colours go through roles (`color::FG`,
   `SEL_BG`, `BLOCKED`, …), all black or white on e-paper.
@@ -282,7 +283,13 @@ behind seams:
   conversation view uses TermMono 14, an 8×14 bitmap font converted from
   Terminus (OFL; licence in `src/fonts/OFL-TermMono.txt`).
 - On the M9, typing on an agent's screens starts a prompt with that letter,
-  Enter sends it, Del deletes and holding Del cancels; Home opens the list.
+  Enter sends it, Del deletes and holding Del cancels.
+- The M9 boots to a dashboard, which Home returns to: session counts by
+  state, every session with its state and age (Up/Down select, Enter opens,
+  Right shows the full list), the watched session's model and context left
+  when known, and each account's 5h/7d limits with time to reset. The
+  far-left Messages key opens the selected session's conversation; pressed
+  there, it opens the session list.
   In the conversation, Up and Down scroll two lines; a quick double tap
   scrolls a page (the keyboard reports taps only, never holds).
 

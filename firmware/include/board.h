@@ -17,10 +17,11 @@ enum ButtonIndex : uint8_t {
   BTN_UP = 4,
   BTN_DOWN = 5,
   BTN_POWER = 6,
-  BTN_HOME = 7,     // M9 only: back to the agent list
+  BTN_HOME = 7,     // M9 only: the dashboard of every session
   BTN_KEYS = 8,     // M9 only: the button under Back, opens Keys
   BTN_PROMPT = 9,   // M9 only: the button under Home, opens Prompt
-  BTN_COUNT = 10,
+  BTN_MESSAGES = 10,  // M9 only: the far-left key, opens the session
+  BTN_COUNT = 11,
 };
 
 #if defined(BOARD_M9)

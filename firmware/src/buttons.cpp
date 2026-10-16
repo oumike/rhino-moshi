@@ -50,6 +50,9 @@ const char* Buttons::name(uint8_t button) {
     case BTN_DOWN: return "down";
     case BTN_POWER: return "power";
     case BTN_HOME: return "home";
+    case BTN_KEYS: return "keys";
+    case BTN_PROMPT: return "prompt";
+    case BTN_MESSAGES: return "messages";
     default: return "unknown";
   }
 }
@@ -136,6 +139,7 @@ void Buttons::readKeyboard() {
     case KB_RIGHT: tap(BTN_RIGHT); break;
     case KB_UP: tap(BTN_UP); break;
     case KB_DOWN: tap(BTN_DOWN); break;
+    case KB_MESSAGES: tap(BTN_MESSAGES); break;
     case KB_HOME: tap(BTN_HOME); break;
     case KB_UNDER_HOME: tap(BTN_PROMPT); break;
     case KB_UNDER_BACK: tap(BTN_KEYS); break;

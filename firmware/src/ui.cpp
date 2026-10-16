@@ -73,8 +73,8 @@ const unsigned long ROTATE_MS = 10000;
 const unsigned long ACTIVITY_MS = 10000;
 const unsigned long HOLD_MS = Buttons::HOLD_MS;  // Back held this long cancels the keyboard
 
-enum class View { None, Message, Status, List, Detail, Card, Keys, Prompts, Keyboard, Menu, Usage, Hosts, Device };
-enum class Screen { List, Detail, Card, Keys, Prompts, Keyboard, Menu, Usage, Hosts, Device };
+enum class View { None, Message, Status, List, Detail, Card, Keys, Prompts, Keyboard, Menu, Usage, Hosts, Device, Home };
+enum class Screen { List, Detail, Card, Keys, Prompts, Keyboard, Menu, Usage, Hosts, Device, Home };
 
 // Screens about one agent; the rest work without any.
 bool agentScreen(Screen s) { return s != Screen::List && s < Screen::Menu; }
@@ -84,7 +84,15 @@ int partials = 0;
 View lastView = View::None;
 String lastMessage;
 
-Screen screen = Screen::List;
+// Keyboard builds (M9) have a Home key and boot to a dashboard of every
+// session; the X4 boots to the agent list.
+#define HAS_DASHBOARD HAS_TRANSCRIPT
+#if HAS_DASHBOARD
+const Screen HOME = Screen::Home;
+#else
+const Screen HOME = Screen::List;
+#endif
+Screen screen = HOME;
 String selectedId;
 int cursor = 0;
 bool pending = false;  // gateway changes not drawn yet
@@ -1097,6 +1105,147 @@ String span(long d) {
   return String(d / 86400) + "d " + String(d % 86400 / 3600) + "h";
 }
 
+#if HAS_DASHBOARD
+int homeFirst = 0;  // the first session row shown
+
+const char* shortState(AgentState s) {
+  switch (s) {
+    case AgentState::Blocked: return "wait";
+    case AgentState::Working: return "work";
+    case AgentState::Done: return "done";
+    case AgentState::Idle: return "idle";
+    default: return "?";
+  }
+}
+
+// Every session at a glance, with the plan limits under them.
+void drawHome(Gateway& gw, Agents& agents) {
+  header(gw, agents);
+  const int LH = MONO_LINE_H;
+  const int CW = 8;  // TermMono cell width
+  int y = HEADER_H + 4;
+
+  // Counts by state.
+  int n[5] = {};
+  for (size_t i = 0; i < agents.size(); i++) n[(int)agents[i].state]++;
+  display.setFont(F_MONO);
+  int x = MARGIN;
+  auto part = [&](const String& t, uint16_t c) {
+    text(x, y + 12, t, F_MONO, c);
+    x += t.length() * CW + CW * 2;
+  };
+  if (gw.state() != LinkState::Online && !agents.loaded()) {
+    part(gw.state() == LinkState::Connecting ? "Connecting to host..." : "Not connected", color::MUTED);
+  } else if (!agents.loaded()) {
+    part("Loading sessions...", color::MUTED);
+  } else {
+    part(String(agents.size()) + (agents.size() == 1 ? " session" : " sessions"), color::FG);
+    if (n[(int)AgentState::Blocked]) part(String(n[(int)AgentState::Blocked]) + " waiting", color::BLOCKED);
+    if (n[(int)AgentState::Working]) part(String(n[(int)AgentState::Working]) + " working", color::WORKING);
+    if (n[(int)AgentState::Done]) part(String(n[(int)AgentState::Done]) + " done", color::DONE);
+  }
+  y += LH;
+
+  // The model and context left are only known for the watched session.
+  int wi = agents.indexOf(gw.watchedId());
+  String info = wi >= 0 ? infoText(gw, agents[wi]) : String();
+  if (info.length()) {
+    info.replace(" - ", ", ");
+    String who = ascii(agents[wi].workspace);
+    String line = who + ": " + info;
+    text(MARGIN, y + 12, fit(line, W() - 2 * MARGIN), F_MONO, color::MUTED);
+    y += LH;
+  }
+  y += 4;
+
+  // Usage windows take the bottom; sessions get what is left.
+  time_t now = time(nullptr);
+  bool clock = now > 1700000000;
+  struct Win { String name; const UsageWindow* w; };
+  std::vector<Win> wins;
+  for (const UsageAccount& a : gw.usage().accounts())
+    for (const UsageWindow& w : a.windows) wins.push_back({agentName(a.agent), &w});
+  const int MAX_WINS = 4;
+  int shownWins = min((int)wins.size(), MAX_WINS);
+  int usageH = shownWins ? 6 + LH * shownWins : 0;
+  int listTop = y + LH;
+  int rows = max(1, (H() - usageH - listTop) / LH);
+
+  display.setFont(F_SMALL);
+  int lw = textWidth("SESSIONS");
+  text(MARGIN, y + 12, "SESSIONS", F_SMALL, color::MUTED);
+  display.drawFastHLine(MARGIN + lw + 6, y + 8, W() - 2 * MARGIN - lw - 6, color::RULE);
+  y = listTop;
+  int count = agents.size();
+  if (cursor < homeFirst) homeFirst = cursor;
+  if (cursor >= homeFirst + rows) homeFirst = cursor - rows + 1;
+  homeFirst = constrain(homeFirst, 0, max(0, count - rows));
+  if (agents.loaded() && !count) text(MARGIN, y + 12, "No agents running.", F_MONO, color::MUTED);
+  for (int r = 0; r < rows && homeFirst + r < count; r++) {
+    int i = homeFirst + r;
+    const Agent& a = agents[i];
+    bool sel = i == cursor;
+    uint16_t fg = sel ? color::SEL_FG : color::FG;
+    if (sel) display.fillRect(0, y, W(), LH, color::SEL_BG);
+    display.fillCircle(MARGIN + 3, y + LH / 2, 3, stateColor(a.state));
+    String right = String(shortState(a.state));
+    String ago = age(a.changedAt, a.approx);
+    if (ago.length()) right += " " + ago;
+    if (a.unseen) right = "* " + right;
+    int rx = W() - MARGIN - right.length() * CW;
+    text(rx, y + 12, right, F_MONO, sel ? fg : stateColor(a.state));
+    String name = ascii(a.workspace);
+    if (a.tab.length() && a.tab != "1") name += "/" + ascii(a.tab);
+    String kind = ascii(a.kind);
+    int nx = MARGIN + 12;
+    int room = (rx - nx) / CW - 1;
+    if (kind.length() && (int)(name.length() + kind.length()) + 1 <= room) {
+      text(nx, y + 12, name, F_MONO, fg);
+      text(nx + (name.length() + 1) * CW, y + 12, kind, F_MONO, sel ? fg : color::MUTED);
+    } else {
+      display.setFont(F_MONO);
+      text(nx, y + 12, fit(name, rx - nx - CW), F_MONO, fg);
+    }
+    y += LH;
+  }
+  if (count > homeFirst + rows) {
+    String more = "+" + String(count - homeFirst - rows);
+    display.setFont(F_SMALL);
+    text(W() - MARGIN - textWidth(more), H() - usageH - 2, more, F_SMALL, color::MUTED);
+  }
+
+  if (!shownWins) return;
+  y = H() - usageH;
+  display.drawFastHLine(MARGIN, y + 2, W() - 2 * MARGIN, color::RULE);
+  y += 6;
+  for (int k = 0; k < shownWins; k++) {
+    const UsageWindow& w = *wins[k].w;
+    // "Claude 5h [bar] 12% 3h20m"
+    String left = wins[k].name;
+    if (left.length() > 7) left = left.substring(0, 7);
+    while (left.length() < 7) left += ' ';
+    left += " " + ascii(w.label);
+    while (left.length() < 11) left += ' ';
+    text(MARGIN, y + 12, left, F_MONO, color::FG);
+    String pct = String(w.used) + "%";
+    while (pct.length() < 4) pct = " " + pct;
+    String reset = clock && w.resetsAt > 0 ? span(max(0L, (long)(w.resetsAt - now))) : String();
+    while (reset.length() < 7) reset = " " + reset;
+    String right = pct + " " + reset;
+    int rx = W() - MARGIN - right.length() * CW;
+    text(rx, y + 12, pct, F_MONO, w.used >= 90 ? color::BLOCKED : color::FG);
+    text(rx + (pct.length() + 1) * CW, y + 12, reset, F_MONO, color::MUTED);
+    int bx = MARGIN + 12 * CW, bw = rx - CW - bx, bh = 8;
+    if (bw > 10) {
+      display.drawRect(bx, y + 4, bw, bh, color::RULE);
+      display.fillRect(bx + 2, y + 6, (bw - 4) * min(w.used, 100) / 100, bh - 4,
+                       w.used >= 90 ? color::BLOCKED : color::BAR);
+    }
+    y += LH;
+  }
+}
+#endif
+
 void drawUsage(Gateway& gw, Agents& agents) {
   header(gw, agents);
   title("Usage");
@@ -1596,7 +1745,7 @@ void openMenu() {
 
 bool menuInput(Buttons& b) {
   if (b.wasPressed(BTN_BACK)) {
-    screen = Screen::List;
+    screen = HOME;
     return true;
   }
   if (menuMove(b, MENU_LEN, mainSel)) return true;
@@ -1652,16 +1801,29 @@ bool hostsInput(Gateway& gw, Buttons& b) {
   } else {
     return false;
   }
-  screen = Screen::List;
+  screen = HOME;
   return true;
 }
 
 // Returns true if the input changed what is on screen.
 bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
 #if HAS_KEYBOARD
-  if (b.wasPressed(BTN_HOME) && screen != Screen::List) {
+  if (b.wasPressed(BTN_HOME) && screen != HOME) {
     draft = "";
-    screen = Screen::List;
+    screen = HOME;
+    return true;
+  }
+  // The Messages key opens the selected session's conversation; from there,
+  // or with none to open, the session list.
+  if (b.wasPressed(BTN_MESSAGES)) {
+    draft = "";
+    if (screen != Screen::Detail && agents.size() && agents.indexOf(selectedId) >= 0) {
+      screen = Screen::Detail;
+      agents.markSeen(selectedId);
+      agents.setDismissed(selectedId, false);
+    } else if (screen != Screen::List) {
+      screen = Screen::List;
+    } else return false;
     return true;
   }
   // Dedicated buttons jump straight to an agent's Keys or Prompt screen.
@@ -1705,6 +1867,19 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
         return true;
       }
       return false;
+#if HAS_DASHBOARD
+    case View::Home:
+      if (b.wasPressed(BTN_BACK)) openMenu();
+      else if (b.wasPressed(BTN_DOWN)) moveCursor(agents, 1);
+      else if (b.wasPressed(BTN_UP)) moveCursor(agents, -1);
+      else if (b.wasPressed(BTN_RIGHT)) screen = Screen::List;
+      else if (b.wasPressed(BTN_CONFIRM) && agents.size()) {
+        screen = Screen::Detail;
+        agents.markSeen(selectedId);
+        agents.setDismissed(selectedId, false);
+      } else return false;
+      return true;
+#endif
     case View::List: {
       int per = rowsPerPage();
       if (b.wasPressed(BTN_BACK)) openMenu();
@@ -1840,6 +2015,7 @@ View viewFor(LinkState st, Agents& agents) {
     case Screen::Keys: return View::Keys;
     case Screen::Prompts: return View::Prompts;
     case Screen::Keyboard: return View::Keyboard;
+    case Screen::Home: return View::Home;
     default: return View::List;
   }
 }
@@ -1948,6 +2124,9 @@ static void updateLocked(Gateway& gw, Agents& agents, Buttons& buttons, bool cha
     case View::Usage: draw(drawUsage); break;
     case View::Hosts: draw(drawHosts); break;
     case View::Device: draw(drawDevice); break;
+#if HAS_DASHBOARD
+    case View::Home: draw(drawHome); break;
+#endif
     default: draw(drawStatus); break;
   }
   if (inputAt) Serial.printf("[ui] press to screen %lu ms\n", millis() - inputAt);

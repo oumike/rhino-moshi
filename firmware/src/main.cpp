@@ -60,6 +60,7 @@ static void serialTask(void*) {
       else if (c == 'd') buttons.inject(BTN_DOWN);
       else if (c == 'h') buttons.inject(BTN_BACK, 1000);
       else if (c == 'm') buttons.inject(BTN_HOME);
+      else if (c == 'g') buttons.inject(BTN_MESSAGES);
       else if (c == 's') shotRequested = true;
     }
     vTaskDelay(pdMS_TO_TICKS(10));

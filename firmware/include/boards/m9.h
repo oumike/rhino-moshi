@@ -64,6 +64,7 @@ enum KbCode : uint8_t {
   KB_ENTER_LF = 0x0A,
   KB_ENTER = 0x0D,
   KB_DEL_7F = 0x7F,
+  KB_MESSAGES = 0x81,    // far-left key (camillia's Messages): opens the session
   KB_HOME = 0x82,
   KB_UNDER_HOME = 0x83,  // button below Home (camillia's DMs): opens Prompt
   KB_UNDER_BACK = 0x84,  // button below Back (camillia's Tools): opens Keys
