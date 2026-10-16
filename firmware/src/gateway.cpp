@@ -91,6 +91,8 @@ void Gateway::switchHost(int index) {
   watchId_ = watchSource_ = watchSession_ = answeredKey_ = "";
   transcript_.clear();
   trId_ = trSource_ = trSession_ = "";
+  tokensLeft_ = -1;
+  tokensId_ = "";
   trDirty_ = trOlderReq_ = trOlderPending_ = false;
   detail_ = fingerprint_ = "";
   backoffMs_ = 0;
@@ -419,6 +421,11 @@ bool Gateway::handleTranscript(JsonDocument& doc, DeserializationError err) {
   Serial.printf("[gw] transcript %s: %u items, heap %u free (min %u)\n", type.c_str(),
                 (unsigned)transcript_.items().size(), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
   if (c) transcriptUpdated_ = true;
+  if (transcript_.tokensLeft() >= 0 && (transcript_.tokensLeft() != tokensLeft_ || trId_ != tokensId_)) {
+    tokensLeft_ = transcript_.tokensLeft();
+    tokensId_ = trId_;
+    c = true;
+  }
   return c;
 }
 

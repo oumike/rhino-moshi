@@ -1247,7 +1247,7 @@ void drawHome(Gateway& gw, Agents& agents) {
   time_t now = time(nullptr);
   bool clock = now > 1700000000;
   const std::vector<UsageAccount>& accs = gw.usage().accounts();
-  const int BOTTOM_ROWS = 5;  // agents, spaces, servers, sims, device
+  const int BOTTOM_ROWS = 6;  // tokens, agents, spaces, servers, sims, device
   int room = max(1, (H() - FOOTER_H - y - 10 - BOTTOM_ROWS * LH) / LH);
   int shown = 0, total = 0;
   for (const UsageAccount& a : accs) total += a.windows.size();
@@ -1277,6 +1277,23 @@ void drawHome(Gateway& gw, Agents& agents) {
       shown++;
     }
   }
+
+  // Claude Code's context budget, from the last conversation opened.
+  label("TOKENS");
+  if (gw.tokensLeft() < 0) {
+    value("open a Claude session", color::MUTED);
+  } else {
+    double n = (double)gw.tokensLeft();
+    char v[16];
+    if (n >= 1e6) snprintf(v, sizeof(v), "%.2fM", n / 1e6);
+    else if (n >= 1e3) snprintf(v, sizeof(v), "%.0fk", n / 1e3);
+    else snprintf(v, sizeof(v), "%.0f", n);
+    String s = String(v) + " left";
+    int ai = agents.indexOf(gw.tokensAgentId());
+    if (ai >= 0) s += "  " + ascii(agents[ai].tab.length() ? agents[ai].tab : agents[ai].workspace);
+    value(s);
+  }
+  y += LH;
 
   // What's running on the host.
   rule();

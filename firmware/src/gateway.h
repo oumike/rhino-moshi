@@ -138,6 +138,10 @@ class Gateway {
   // Ask the host for an older page; no-op if there's none or one is in flight.
   void requestOlderTranscript();
   bool takeTranscriptUpdate();
+  // The last "tokens left" seen in a watched Claude conversation (-1: none),
+  // kept after the conversation is closed, and that agent's id.
+  long long tokensLeft() const { return tokensLeft_; }
+  const String& tokensAgentId() const { return tokensId_; }
 
  private:
   struct Guard {
@@ -186,6 +190,8 @@ class Gateway {
   bool trOlderReq_ = false;    // an older page was asked for
   bool trOlderPending_ = false;  // an older request is in flight
   bool transcriptUpdated_ = false;
+  long long tokensLeft_ = -1;
+  String tokensId_;
   String answeredKey_;  // last card answered (or found stale) from the X4
   LinkState state_ = LinkState::Connecting;
   String detail_;

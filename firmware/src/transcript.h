@@ -127,9 +127,12 @@ class Transcript {
   bool canLoadOlder() const { return hasMore_ && (BOARD_HAS_PSRAM || items_.size() < MAX_ITEMS); }
   int oldestLine() const { return oldestLine_; }
   int totalLines() const { return totalLines_; }
+  // Claude Code's latest "tokens left" reminder, or -1 if none was seen.
+  long long tokensLeft() const { return tokensLeft_; }
 
  private:
-  void flatten(JsonObjectConst entry, std::vector<Item>& out) const;
+  void flatten(JsonObjectConst entry, std::vector<Item>& out);
+  void noteTokens(JsonVariantConst content, int line);
   void trimFront();
 
   std::vector<Item> items_;
@@ -137,4 +140,6 @@ class Transcript {
   int totalLines_ = 0;
   bool hasMore_ = false;
   bool received_ = false;
+  long long tokensLeft_ = -1;
+  int tokensLine_ = -1;
 };

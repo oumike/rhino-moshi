@@ -45,6 +45,46 @@ String joinText(const String& a, const char* b) {
   return t;
 }
 
+String joinOptions(JsonArrayConst opts, const char* key = nullptr) {
+  String s;
+  for (JsonVariantConst o : opts) {
+    const char* v = key ? (o[key] | "") : (o | "");
+    if (!*v) continue;
+    s += (s.length() ? " / " : "") + String(v);
+  }
+  return s;
+}
+
+// The question an agent asked, as readable text, or "" if `block` isn't one.
+// Copilot's ask_user carries a message and a form; Claude Code's
+// AskUserQuestion carries questions with labelled options.
+String questionText(JsonObjectConst block) {
+  const char* name = block["name"] | "";
+  JsonObjectConst in = block["input"];
+  String t;
+  if (!strcmp(name, "ask_user")) {
+    t = in["message"] | "";
+    for (JsonPairConst f : in["requestedSchema"]["properties"].as<JsonObjectConst>()) {
+      JsonObjectConst p = f.value();
+      String line = "- " + String(p["title"] | f.key().c_str());
+      String opts = joinOptions(p["enum"]);
+      if (!opts.length()) opts = joinOptions(p["oneOf"], "title");
+      if (!opts.length() && !strcmp(p["type"] | "", "boolean")) opts = "yes / no";
+      if (opts.length()) line += " (" + opts + ")";
+      t += "\n" + line;
+    }
+  } else if (!strcmp(name, "AskUserQuestion")) {
+    for (JsonObjectConst q : in["questions"].as<JsonArrayConst>()) {
+      String line = q["question"] | "";
+      String opts = joinOptions(q["options"], "label");
+      if (opts.length()) line += "\n(" + opts + ")";
+      t = joinText(t, line.c_str());
+    }
+  }
+  t.trim();
+  return t;
+}
+
 }  // namespace
 
 void Transcript::buildFilter(JsonDocument& filter) {
@@ -67,15 +107,35 @@ void Transcript::clear() {
   totalLines_ = 0;
   hasMore_ = false;
   received_ = false;
+  tokensLeft_ = -1;
+  tokensLine_ = -1;
 }
 
-void Transcript::flatten(JsonObjectConst entry, std::vector<Item>& out) const {
+// Keeps the newest "<total_tokens>N tokens left</total_tokens>" reminder.
+void Transcript::noteTokens(JsonVariantConst content, int line) {
+  if (line <= tokensLine_ || !content.is<JsonArrayConst>()) return;
+  for (JsonObjectConst block : content.as<JsonArrayConst>()) {
+    const char* t = block["text"] | "";
+    const char* p = strstr(t, "<total_tokens>");
+    if (!p) continue;
+    p += strlen("<total_tokens>");
+    if (*p < '0' || *p > '9') continue;
+    tokensLeft_ = strtoll(p, nullptr, 10);
+    tokensLine_ = line;
+    return;
+  }
+}
+
+void Transcript::flatten(JsonObjectConst entry, std::vector<Item>& out) {
   int line = entry["line"] | 0;
   JsonObjectConst msg = entry["raw"]["message"];
   const char* type = entry["raw"]["type"] | "";
   // Claude Code logs each API request as an "api-request-blob" (system prompt,
   // <total_tokens> reminders, ...); those aren't turns of the conversation.
-  if (!strcmp(type, "api-request-blob")) return;
+  if (!strcmp(type, "api-request-blob")) {
+    noteTokens(msg["content"], line);
+    return;
+  }
   if (!strcmp(msg["role"] | "", "system")) return;
   const char* role = msg["role"] | type;
   Role r = strcmp(role, "assistant") == 0 ? Role::Assistant : Role::User;
@@ -97,7 +157,9 @@ void Transcript::flatten(JsonObjectConst entry, std::vector<Item>& out) const {
       const char* t = block["text"] | "";
       if (*t) text = joinText(text, t);
     } else if (!strcmp(bt, "tool_use")) {
-      tools.push_back({Role::Tool, line, summarizeTool(block)});
+      String q = questionText(block);
+      if (q.length()) text = joinText(text, q.c_str());
+      else tools.push_back({Role::Tool, line, summarizeTool(block)});
     }
     // tool_result blocks are dropped: they're the terminal output, not the turn.
   }
