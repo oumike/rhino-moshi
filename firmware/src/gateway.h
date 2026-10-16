@@ -124,7 +124,7 @@ class Gateway {
   void disconnect();
   bool handleMessage();
   bool handleAgentStatus();
-  bool handleTranscript();
+  bool handleTranscript(JsonDocument& doc, DeserializationError err);
   String watchFrame() const;
 
   SemaphoreHandle_t mutex_ = nullptr;
@@ -135,7 +135,9 @@ class Gateway {
   Usage usage_;
   SshLink link_;  // network task only
   WsClient ws_;   // network task only
-  WsClient tws_{96 * 1024};  // transcripts; a larger PSRAM-backed buffer
+  // Transcripts: a Claude page can run to megabytes (tool output, request
+  // snapshots), so it is parsed as it arrives rather than buffered.
+  WsClient tws_{WsClient::Mode::Streamed};
   Card card_;
   Transcript transcript_;
   String watchId_, watchSource_, watchSession_;

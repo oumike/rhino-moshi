@@ -1,6 +1,5 @@
 #include "ws.h"
 
-#include <esp_heap_caps.h>
 #include <esp_random.h>
 
 #include "ssh_link.h"
@@ -16,6 +15,9 @@ void WsClient::reset() {
   buf_ = nullptr;
   cap_ = len_ = 0;
   oversized_ = false;
+  inMessage_ = false;
+  fin_ = true;
+  remaining_ = chunkPos_ = chunkLen_ = 0;
 }
 
 bool WsClient::open(ssh_channel ch, const char* path, String& error) {
@@ -112,17 +114,50 @@ void WsClient::trim() {
 
 bool WsClient::reserve(size_t cap) {
   if (cap <= cap_) return true;
-  // A large socket (transcripts) keeps its buffer in PSRAM; the small /events
-  // one stays in internal RAM. Each instance sticks to one allocator.
-  char* p = maxMessage_ > MAX_MESSAGE ? (char*)heap_caps_realloc(buf_, cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
-                                      : (char*)realloc(buf_, cap);
+  char* p = (char*)realloc(buf_, cap);
   if (!p) return false;
   buf_ = p;
   cap_ = cap;
   return true;
 }
 
+bool WsClient::readHeader(bool& fin, uint8_t& opcode, uint64_t& len) {
+  uint8_t h[2];
+  if (!readExact(h, 2)) return false;
+  fin = h[0] & 0x80;
+  opcode = h[0] & 0x0f;
+  len = h[1] & 0x7f;
+  if (len == 126) {
+    uint8_t e[2];
+    if (!readExact(e, 2)) return false;
+    len = (e[0] << 8) | e[1];
+  } else if (len == 127) {
+    uint8_t e[8];
+    if (!readExact(e, 8)) return false;
+    len = 0;
+    for (int i = 0; i < 8; i++) len = (len << 8) | e[i];
+  }
+  if (h[1] & 0x80) return false;  // servers must not mask
+  lastRx_ = millis();
+  return true;
+}
+
+// Reads and answers a control frame (<= 125 bytes, never fragmented). False
+// on close or a broken frame.
+bool WsClient::control(uint8_t opcode, uint64_t len) {
+  if (len > 125) return false;
+  uint8_t payload[125];
+  if (!readExact(payload, len)) return false;
+  if (opcode == 0x8) {
+    sendFrame(0x8, payload, len >= 2 ? 2 : 0);
+    return false;
+  }
+  if (opcode == 0x9) sendFrame(0xA, payload, len);
+  return true;
+}
+
 WsClient::Poll WsClient::poll() {
+  if (inMessage_) endMessage();
   if (!ch_) return Poll::Closed;
   int avail = ssh_channel_poll(ch_, 0);
   if (avail == SSH_ERROR || avail == SSH_EOF) {
@@ -135,38 +170,26 @@ WsClient::Poll WsClient::poll() {
   len_ = 0;
   oversized_ = false;
   while (true) {
-    uint8_t h[2];
-    if (!readExact(h, 2)) break;
-    bool fin = h[0] & 0x80;
-    uint8_t opcode = h[0] & 0x0f;
-    uint64_t len = h[1] & 0x7f;
-    if (len == 126) {
-      uint8_t e[2];
-      if (!readExact(e, 2)) break;
-      len = (e[0] << 8) | e[1];
-    } else if (len == 127) {
-      uint8_t e[8];
-      if (!readExact(e, 8)) break;
-      len = 0;
-      for (int i = 0; i < 8; i++) len = (len << 8) | e[i];
-    }
-    if (h[1] & 0x80) break;  // servers must not mask
-    lastRx_ = millis();
+    bool fin;
+    uint8_t opcode;
+    uint64_t len;
+    if (!readHeader(fin, opcode, len)) break;
 
-    if (opcode >= 0x8) {  // control frames: <= 125 bytes, never fragmented
-      if (len > 125) break;
-      uint8_t payload[125];
-      if (!readExact(payload, len)) break;
-      if (opcode == 0x8) {
-        sendFrame(0x8, payload, len >= 2 ? 2 : 0);
-        break;
-      }
-      if (opcode == 0x9) sendFrame(0xA, payload, len);
+    if (opcode >= 0x8) {
+      if (!control(opcode, len)) break;
       if (len_ == 0 && !oversized_) return Poll::Nothing;
       continue;  // a control frame between fragments
     }
 
-    if (oversized_ || len_ + len > maxMessage_) {
+    if (streamed_) {
+      inMessage_ = true;
+      fin_ = fin;
+      remaining_ = len;
+      chunkPos_ = chunkLen_ = 0;
+      return Poll::Stream;
+    }
+
+    if (oversized_ || len_ + len > MAX_MESSAGE) {
       oversized_ = true;
       if (!skip(len)) break;
     } else {
@@ -178,4 +201,69 @@ WsClient::Poll WsClient::poll() {
   }
   reset();
   return Poll::Closed;
+}
+
+// Refills the read-ahead from the streamed message, crossing into its next
+// fragment (and past any control frames) as needed. False at its end.
+bool WsClient::fill() {
+  if (!inMessage_ || !ch_) return false;
+  while (remaining_ == 0) {
+    if (fin_) return false;
+    bool fin;
+    uint8_t opcode;
+    uint64_t len;
+    if (!readHeader(fin, opcode, len)) {
+      reset();
+      return false;
+    }
+    if (opcode >= 0x8) {
+      if (!control(opcode, len)) {
+        reset();
+        return false;
+      }
+      continue;
+    }
+    fin_ = fin;
+    remaining_ = len;
+  }
+  size_t n = remaining_ < sizeof(chunk_) ? (size_t)remaining_ : sizeof(chunk_);
+  if (!readExact(chunk_, n)) {
+    reset();
+    return false;
+  }
+  remaining_ -= n;
+  chunkPos_ = 0;
+  chunkLen_ = n;
+  return true;
+}
+
+int WsClient::read() {
+  if (chunkPos_ == chunkLen_ && !fill()) return -1;
+  return chunk_[chunkPos_++];
+}
+
+size_t WsClient::readBytes(char* dst, size_t n) {
+  size_t got = 0;
+  while (got < n) {
+    if (chunkPos_ == chunkLen_ && !fill()) break;
+    size_t k = min(n - got, chunkLen_ - chunkPos_);
+    memcpy(dst + got, chunk_ + chunkPos_, k);
+    chunkPos_ += k;
+    got += k;
+  }
+  return got;
+}
+
+void WsClient::endMessage() {
+  while (inMessage_ && ch_) {
+    if (remaining_ && !skip(remaining_)) {
+      reset();
+      break;
+    }
+    remaining_ = 0;
+    chunkPos_ = chunkLen_ = 0;
+    if (!fill()) break;
+  }
+  inMessage_ = false;
+  chunkPos_ = chunkLen_ = 0;
 }

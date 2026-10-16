@@ -328,6 +328,10 @@ void Gateway::pollTranscript() {
     }
   }
 
+  static PsRamAllocator alloc;
+  static JsonDocument filter;
+  if (filter.isNull()) Transcript::buildFilter(filter);
+
   for (int i = 0; i < MAX_MESSAGES_PER_POLL; i++) {
     WsClient::Poll p = tws_.poll();
     if (p == WsClient::Poll::Nothing) break;
@@ -335,29 +339,24 @@ void Gateway::pollTranscript() {
       Serial.println("[gw] transcript socket closed");
       break;
     }
-    if (p == WsClient::Poll::Oversized) {
-      Serial.println("[gw] dropped an oversized transcript frame");
-      Guard g(*this);
-      trOlderPending_ = false;
-      continue;
-    }
+    if (p != WsClient::Poll::Stream) continue;
+    // Parsed off the socket without the lock: a big page takes a while, and
+    // the filter skips everything but the conversation as it goes by. Claude's
+    // request snapshots nest well past ArduinoJson's default depth of 10.
+    JsonDocument doc(&alloc);
+    DeserializationError err = deserializeJson(doc, tws_, DeserializationOption::Filter(filter),
+                                               DeserializationOption::NestingLimit(64));
+    tws_.endMessage();
     Guard g(*this);
-    if (linkGen_ != gen_) return;
-    changed_ |= handleTranscript();
-    tws_.trim();
+    if (linkGen_ != gen_ || trDirty_) return;  // the watch moved on mid-page
+    changed_ |= handleTranscript(doc, err);
   }
 }
 
-bool Gateway::handleTranscript() {
-  static PsRamAllocator alloc;
-  static JsonDocument filter;
-  if (filter.isNull()) Transcript::buildFilter(filter);
-
-  JsonDocument doc(&alloc);
-  DeserializationError err =
-      deserializeJson(doc, tws_.message(), tws_.messageLength(), DeserializationOption::Filter(filter));
+bool Gateway::handleTranscript(JsonDocument& doc, DeserializationError err) {
   if (err) {
-    Serial.printf("[gw] transcript frame of %u bytes: %s\n", (unsigned)tws_.messageLength(), err.c_str());
+    Serial.printf("[gw] transcript frame: %s\n", err.c_str());
+    trOlderPending_ = false;
     return false;
   }
   String type;
