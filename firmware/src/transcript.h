@@ -107,8 +107,8 @@ class Transcript {
   static const size_t MAX_ITEMS = 400;
   static const size_t STRING_CAP = 0;  // frame strings are kept whole
 #else
-  // About ten screens on the X4, each item at most a few STRING_CAPs long.
-  static const size_t MAX_ITEMS = 60;
+  // A handful of screens on the X4, each item at most a few STRING_CAPs long.
+  static const size_t MAX_ITEMS = 40;
   static const size_t STRING_CAP = 600;
 #endif
 

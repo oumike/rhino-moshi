@@ -182,8 +182,6 @@ from `main`. It adds:
 ```
  Agents                        Card                          Agent (conversation)
 ┌────────────────────────┐   ┌────────────────────────┐   ┌────────────────────────┐
-│Prev │Next │ Open │Home │   │Deny │Next │Approve│Back│   │     │Prompt│Answer│Back│
-├────────────────────────┤   ├────────────────────────┤   ├────────────────────────┤
 │ laptop   5h 42% online │   │ laptop    1 of 3 ⧗ 5m  │   │ laptop   5h 42% online │
 │────────────────────────│   │────────────────────────│   │────────────────────────│
 │▶! app-moshi  claude 5m │   │ app-moshi · claude     │   │ app-moshi - claude     │
@@ -192,13 +190,14 @@ from `main`. It adds:
 │   Running tests…       │   │ touch /tmp/probe       │   │────────────────────────│
 │ ✓•docs       claude 2h │   │                        │   │ Fix the login redirect │
 │ · scratch    shell     │   │                        │   │ - Read auth.ts         │
+├────────────────────────┤   ├────────────────────────┤   ├────────────────────────┤
+│Home │ Open │Prev │Next │   │Back │Approve│Deny│Next │   │Back │Answer│    │Prompt│
 └────────────────────────┘   └────────────────────────┘   └────────────────────────┘
 ```
 
-The X4 is held with its key row above the screen and the page-turn keys on the
-left edge; the screen is drawn that way up only. Each key's label sits in a
-band along the top edge, under the key: left to right, Left, Right, Confirm,
-Back. Up is the upper side key.
+The X4 is held with its key row below the screen and the page-turn keys on
+the right edge; the screen is drawn that way up only. Each key's label sits
+over it along the bottom edge: left to right, Back, Confirm, Left, Right.
 
 - **Agents:** sorted attention-first (blocked, then done, then by
   `statusChangedAt`). An agent that finishes is re-sorted and marked unseen
@@ -226,7 +225,7 @@ Back. Up is the upper side key.
   (redrawn at most every 10 s), over the agent's conversation in TermMono 20:
   prompts, replies and one line per tool call, read-only. It follows the
   newest message; Up and Down page through it, and Up at the top loads older
-  messages. Without PSRAM it keeps the last 60 messages and cuts each string
+  messages. Without PSRAM it keeps the last 40 messages and cuts each string
   in a transcript frame at 600 bytes. New messages redraw it at most every
   3 s. Answer reopens a pending card and Prompt opens the canned prompts
   (only for agents with a session).

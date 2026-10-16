@@ -18,7 +18,7 @@ const int MAX_MESSAGES_PER_POLL = 4;
 // Physical source rows per transcript page. Kept small so a page stays within
 // the transcript socket's buffer; several rows fold into one shown message.
 // Smaller without PSRAM, where the whole parsed page sits in internal RAM.
-const int TRANSCRIPT_LIMIT = BOARD_HAS_PSRAM ? 24 : 12;
+const int TRANSCRIPT_LIMIT = BOARD_HAS_PSRAM ? 24 : 8;
 
 #if HAS_HOST_STATS
 // Each reading redraws Home; an e-paper refresh is slower and shows more.
@@ -416,6 +416,8 @@ bool Gateway::handleTranscript(JsonDocument& doc, DeserializationError err) {
   String type;
   bool c = transcript_.apply(doc.as<JsonObjectConst>(), type);
   if (type == "older" || type == "reset" || type == "backlog" || type == "resumed") trOlderPending_ = false;
+  Serial.printf("[gw] transcript %s: %u items, heap %u free (min %u)\n", type.c_str(),
+                (unsigned)transcript_.items().size(), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
   if (c) transcriptUpdated_ = true;
   return c;
 }

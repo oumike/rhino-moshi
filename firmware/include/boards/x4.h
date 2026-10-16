@@ -75,17 +75,18 @@ static const uint8_t BUTTON_ADC_2_COUNT = 2;
 // ---------------------------------------------------------------------------
 // Physical key positions
 //
-// The X4 is held with its key row ABOVE the screen and the page-turn keys on
-// the LEFT edge (see PANEL_ROTATION). Turned that way, the keys' wiring runs
-// backwards, so Buttons swaps Up/Down and Left/Right: Up is still the upper
-// side key, and Left the leftmost of the pair. The key row then reads, left to
-// right, Left, Right, Confirm, Back.
+// On-screen labels are anchored to wherever the real key is, so the label
+// points at the button rather than merely naming it. Two clusters, matching
+// the two ADC ladders:
 //
-// On-screen labels are drawn in a band along the top edge, each over its key.
-// If they come out over the wrong keys, reorder KEY_ROW_ORDER -- that is the
-// only thing that needs to change.
+//   - Up/Down are the page-turn keys on the RIGHT EDGE.
+//   - Back/Confirm/Left/Right are the row BELOW THE SCREEN, left to right.
+//
+// If the labels come out over the wrong keys, reorder BOTTOM_ROW_ORDER -- that
+// is the only thing that needs to change.
 // ---------------------------------------------------------------------------
-static const uint8_t KEY_ROW_ORDER[4] = {BTN_LEFT, BTN_RIGHT, BTN_CONFIRM, BTN_BACK};
+static const uint8_t BOTTOM_ROW_ORDER[4] = {BTN_BACK, BTN_CONFIRM, BTN_LEFT,
+                                            BTN_RIGHT};
 
 // ---------------------------------------------------------------------------
 // Power
@@ -99,10 +100,10 @@ static const float BATTERY_DIVIDER = 2.0f;
 // Panel geometry
 //
 // The driver's native orientation is landscape (800x480); the X4 is used
-// portrait. Rotation 1 puts the key row above the screen and the page-turn
-// keys on the left edge, as the key layout above assumes; it is the only one
-// used. (3 is the same axis turned 180 degrees.)
+// portrait. Rotation 3 puts the key row below the screen and the page-turn
+// keys on the right edge, as the key layout above assumes; it is the only one
+// used. (1 is the same axis turned 180 degrees.)
 // ---------------------------------------------------------------------------
 #define PANEL_NATIVE_WIDTH  800
 #define PANEL_NATIVE_HEIGHT 480
-#define PANEL_ROTATION      1
+#define PANEL_ROTATION      3

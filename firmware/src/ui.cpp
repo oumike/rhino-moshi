@@ -37,7 +37,6 @@ const GFXfont* F_TITLE = &FreeSansBold12pt7b;
 const GFXfont* F_BOLD = &FreeSansBold9pt7b;
 const GFXfont* F_TEXT = &FreeSans9pt7b;
 const GFXfont* F_SMALL = &FreeSans7pt7b;
-const int HEADER_TOP = 0;
 const int HEADER_H = 32;
 const int FOOTER_H = 0;  // M9 has physical keys; no on-screen hint row
 const int ROW_H = 46;
@@ -54,10 +53,8 @@ const GFXfont* F_TEXT = &FreeSans12pt7b;
 const GFXfont* F_SMALL = &FreeSans9pt7b;
 // The X4's key row is above the screen, so the key labels are a band along
 // the top edge, with the header under it; nothing is drawn below the content.
-const int KEY_ROW_H = 58;
-const int HEADER_TOP = KEY_ROW_H;
-const int HEADER_H = KEY_ROW_H + 54;
-const int FOOTER_H = 0;
+const int HEADER_H = 54;
+const int FOOTER_H = 58;
 const int ROW_H = 76;
 const int OPTION_H = 44;
 const int OPTION_DESC_H = 66;
@@ -478,15 +475,15 @@ void header(Gateway& gw, Agents& agents) {
   const GFXfont* rf = LAYOUT_COMPACT ? F_SMALL : F_TEXT;
   display.setFont(rf);
   int rw = textWidth(right);
-  text(W() - MARGIN - rw, HEADER_TOP + S(36), right, rf, rc);
+  text(W() - MARGIN - rw, S(36), right, rf, rc);
   String use = usageSummary(gw.usage());
   if (use.length()) {
     display.setFont(F_SMALL);
     rw += textWidth(use) + S(16);
-    text(W() - MARGIN - rw, HEADER_TOP + S(35), use, F_SMALL, color::MUTED);
+    text(W() - MARGIN - rw, S(35), use, F_SMALL, color::MUTED);
   }
   display.setFont(F_BOLD);
-  text(MARGIN, HEADER_TOP + S(36), fit(ascii(gw.host().name), W() - 3 * MARGIN - rw), F_BOLD);
+  text(MARGIN, S(36), fit(ascii(gw.host().name), W() - 3 * MARGIN - rw), F_BOLD);
   display.fillRect(0, HEADER_H - S(3), W(), S(3), color::RULE);
 }
 
@@ -509,23 +506,23 @@ void drawNotice() {
 // The M9 has a full physical keyboard, so no on-screen key hints are drawn.
 void footer(const char*, const char*, const char*, const char*) {}
 #else
-// Labels for the X4's row of keys, in the band along the top edge, each drawn
-// under its key.
+// Labels for the X4's row of keys below the screen, each drawn over its key.
 void footer(const char* back, const char* confirm, const char* left, const char* right) {
   const char* labels[BTN_COUNT] = {};
   labels[BTN_BACK] = back;
   labels[BTN_CONFIRM] = confirm;
   labels[BTN_LEFT] = left;
   labels[BTN_RIGHT] = right;
+  int top = H() - FOOTER_H;
   int slot = W() / 4;
-  display.fillRect(0, KEY_ROW_H - 2, W(), 2, color::RULE);
+  display.fillRect(0, top, W(), 2, color::RULE);
   display.setFont(F_BOLD);
   for (int i = 0; i < 4; i++) {
-    const char* label = labels[KEY_ROW_ORDER[i]];
-    if (i) display.drawFastVLine(i * slot, 10, KEY_ROW_H - 20, color::RULE);
+    const char* label = labels[BOTTOM_ROW_ORDER[i]];
+    if (i) display.drawFastVLine(i * slot, top + 10, FOOTER_H - 20, color::RULE);
     if (!label || !*label) continue;
     String s = fit(label, slot - 8);
-    text(i * slot + (slot - textWidth(s)) / 2, 37, s, F_BOLD);
+    text(i * slot + (slot - textWidth(s)) / 2, top + 37, s, F_BOLD);
   }
 }
 #endif
@@ -867,7 +864,7 @@ void drawDetail(Gateway& gw, Agents& agents) {
   int convTop = y + 4;
   int composeH = 0;
 #endif
-  int convBottom = H() - composeH;
+  int convBottom = H() - FOOTER_H - composeH;
   int lineH = MONO_LINE_H;
   trRows = max(1, (convBottom - convTop) / lineH);
 
@@ -890,8 +887,14 @@ void drawDetail(Gateway& gw, Agents& agents) {
       y += lineH;
     }
   }
+#if LAYOUT_COMPACT
   if (trScroll > 0 || t.hasMore()) text(W() - MARGIN - S(8), convTop + S(4), "^", F_SMALL, color::MUTED);
   if (trScroll < trMaxScroll) text(W() - MARGIN - S(8), convBottom - S(6), "v", F_SMALL, color::MUTED);
+#else
+  // In the right margin, beside the first and last lines.
+  if (trScroll > 0 || t.hasMore()) text(W() - MARGIN + 3, convTop + lineH, "^", F_SMALL, color::MUTED);
+  if (trScroll < trMaxScroll) text(W() - MARGIN + 3, convTop + trRows * lineH, "v", F_SMALL, color::MUTED);
+#endif
 
 #if HAS_KEYBOARD
   display.fillRect(0, convBottom, W(), S(2), color::RULE);
@@ -1244,7 +1247,7 @@ void drawHome(Gateway& gw, Agents& agents) {
   bool clock = now > 1700000000;
   const std::vector<UsageAccount>& accs = gw.usage().accounts();
   const int BOTTOM_ROWS = 5;  // agents, spaces, servers, sims, device
-  int room = max(1, (H() - y - 10 - BOTTOM_ROWS * LH) / LH);
+  int room = max(1, (H() - FOOTER_H - y - 10 - BOTTOM_ROWS * LH) / LH);
   int shown = 0, total = 0;
   for (const UsageAccount& a : accs) total += a.windows.size();
   if (!total) {
@@ -2126,7 +2129,6 @@ View viewFor(LinkState st, Agents& agents) {
 }
 
 static void updateLocked(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
-  buttons.setUpsideDown(!LAYOUT_COMPACT);  // the X4, keys above the screen
   Gateway::Result result;
   if (gw.takeResult(result)) {
     finishSend(result);
