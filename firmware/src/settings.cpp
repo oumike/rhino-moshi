@@ -48,6 +48,27 @@ void saveRotation(uint8_t rotation) {
   p.end();
 }
 
+uint16_t screenTimeout() {
+  Preferences p;
+  p.begin(NS, true);
+  uint16_t s = p.getUShort("screen_off", DEFAULT_SCREEN_TIMEOUT);
+  p.end();
+  return s;
+}
+
+String screenTimeoutName(uint16_t seconds) {
+  if (!seconds) return "Never";
+  if (seconds < 60) return String(seconds) + " seconds";
+  return String(seconds / 60) + (seconds < 120 ? " minute" : " minutes");
+}
+
+void saveScreenTimeout(uint16_t seconds) {
+  Preferences p;
+  p.begin(NS, false);
+  p.putUShort("screen_off", seconds);
+  p.end();
+}
+
 String webPassword() {
   Preferences p;
   p.begin(NS, true);

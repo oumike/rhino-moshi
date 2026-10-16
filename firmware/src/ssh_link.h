@@ -8,6 +8,9 @@
 // moshi-hook's gateway, as seen from the host: loopback only.
 extern const char* GATEWAY_HOST;
 extern const int GATEWAY_PORT;
+// The forced command on the device's key: "false", or top on boards that show
+// the host's stats.
+extern const char* HOST_COMMAND;
 
 /** The X4's ed25519 key, loaded from NVS or generated on first boot. */
 ssh_key loadOrCreateDeviceKey();
@@ -35,6 +38,12 @@ class SshLink {
 
   // A new channel to the gateway, or nullptr (see error()).
   ssh_channel openGateway();
+
+  // Runs a command (the key's forced command, whatever is asked) and returns
+  // its exit status with up to `maxOut` bytes of its output, or -1 if the
+  // channel failed. `openMs` is how long the channel took to open: one round
+  // trip.
+  int exec(const char* cmd, String& out, size_t maxOut, unsigned long* openMs = nullptr);
 
   const String& error() const { return error_; }
   const String& fingerprint() const { return fingerprint_; }  // host key, "SHA256:..."

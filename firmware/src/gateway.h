@@ -24,6 +24,34 @@ enum class LinkState {
   Incompatible,    // moshi-hook too old or missing a needed capability
 };
 
+// The host's load, from its `top` (see HOST_COMMAND).
+struct HostStats {
+  bool tried = false;  // a read finished, ok or not
+  bool ok = false;
+  String error;        // why not, when tried && !ok
+  float cpu = 0;       // % busy, user + sys
+  float load = 0;      // 1-minute load average
+  uint32_t memUsedMB = 0, memTotalMB = 0;
+  int processes = 0;
+  unsigned long rttMs = 0;  // opening an SSH channel: one round trip
+};
+
+// What moshi-hook says about itself and the host (its doctor event, version
+// and update check).
+struct HostInfo {
+  struct Server {
+    uint16_t port;
+    String process, name;
+  };
+  String version, hostname;
+  bool doctor = false;  // the doctor event arrived
+  bool pro = false;
+  std::vector<Server> servers;
+  std::vector<String> simulators;
+  bool updateChecked = false, updateAvailable = false;
+  String latest;
+};
+
 /**
  * The connection to one host's moshi-hook: SSH session, /events socket and
  * reconnects. Feeds workspace frames into an Agents list, and follows one
@@ -60,6 +88,10 @@ class Gateway {
   // the one used from now on.
   void switchHost(int index);
   const Usage& usage() const { return usage_; }
+  const HostInfo& hostInfo() const { return info_; }
+  const HostStats& hostStats() const { return stats_; }
+  // Read the host's stats every few seconds while something shows them.
+  void wantHostStats(bool on) { wantStats_ = on; }
   // The X4's own key, "SHA256:...".
   const String& deviceKeyFingerprint() const { return deviceFp_; }
 
@@ -124,6 +156,9 @@ class Gateway {
   void disconnect();
   bool handleMessage();
   bool handleAgentStatus();
+  bool handleDoctor();
+  void pollHostStats();
+  void checkUpdate();
   bool handleTranscript(JsonDocument& doc, DeserializationError err);
   String watchFrame() const;
 
@@ -133,6 +168,10 @@ class Gateway {
   HostConfig host_;
   String deviceFp_, fingerprint_;
   Usage usage_;
+  HostInfo info_;
+  HostStats stats_;
+  bool wantStats_ = false;
+  unsigned long statsAt_ = 0, updateAt_ = 0;
   SshLink link_;  // network task only
   WsClient ws_;   // network task only
   // Transcripts: a Claude page can run to megabytes (tool output, request

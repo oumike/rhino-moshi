@@ -4,6 +4,11 @@
 
 const char* GATEWAY_HOST = "127.0.0.1";
 const int GATEWAY_PORT = 24543;
+#if HAS_HOST_STATS
+const char* HOST_COMMAND = "/usr/bin/top -l 1 -n 0 -s 0";
+#else
+const char* HOST_COMMAND = "false";
+#endif
 
 namespace {
 const long CONNECT_TIMEOUT_S = 10;
@@ -42,8 +47,9 @@ String authorizedKeysLine(ssh_key key) {
   char* pub = nullptr;
   if (ssh_pki_export_pubkey_base64(key, &pub) != SSH_OK) return String();
   char line[256];
-  snprintf(line, sizeof(line), "restrict,port-forwarding,permitopen=\"%s:%d\",command=\"false\" ssh-ed25519 %s rhino-moshi-" BOARD_SLUG,
-           GATEWAY_HOST, GATEWAY_PORT, pub);
+  snprintf(line, sizeof(line),
+           "restrict,port-forwarding,permitopen=\"%s:%d\",command=\"%s\" ssh-ed25519 %s rhino-moshi-" BOARD_SLUG,
+           GATEWAY_HOST, GATEWAY_PORT, HOST_COMMAND, pub);
   ssh_string_free_char(pub);
   return line;
 }
@@ -130,6 +136,39 @@ ssh_channel SshLink::openGateway() {
     return nullptr;
   }
   return ch;
+}
+
+int SshLink::exec(const char* cmd, String& out, size_t maxOut, unsigned long* openMs) {
+  out = "";
+  if (!session_) {
+    error_ = "not connected";
+    return -1;
+  }
+  unsigned long t0 = millis();
+  ssh_channel ch = ssh_channel_new(session_);
+  if (!ch) {
+    error_ = "out of memory";
+    return -1;
+  }
+  if (ssh_channel_open_session(ch) != SSH_OK) {
+    error_ = ssh_get_error(session_);
+    ssh_channel_free(ch);
+    return -1;
+  }
+  if (openMs) *openMs = millis() - t0;
+  if (ssh_channel_request_exec(ch, cmd) != SSH_OK) {
+    error_ = ssh_get_error(session_);
+    closeChannel(ch);
+    return -1;
+  }
+  char buf[512];
+  int n;
+  while ((n = ssh_channel_read_timeout(ch, buf, sizeof(buf), 0, 5000)) > 0)
+    if (out.length() < maxOut) out.concat(buf, min((size_t)n, maxOut - out.length()));
+  int status = n < 0 ? -1 : ssh_channel_get_exit_status(ch);
+  if (n < 0) error_ = ssh_get_error(session_);
+  closeChannel(ch);
+  return status;
 }
 
 void closeChannel(ssh_channel ch) {

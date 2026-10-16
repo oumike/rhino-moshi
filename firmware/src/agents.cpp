@@ -25,7 +25,7 @@ void Agents::buildFilter(JsonDocument& filter) {
   JsonObject g = filter["workspaces"]["groups"][0].to<JsonObject>();
   g["label"] = true;
   JsonObject t = g["children"][0].to<JsonObject>();
-  for (const char* k : {"id", "label", "agent", "agentStatus", "sessionId", "title", "cwd", "statusChangedAt",
+  for (const char* k : {"id", "label", "agent", "agentStatus", "paneCount", "sessionId", "title", "cwd", "statusChangedAt",
                         "statusChangedAtApprox"})
     t[k] = true;
 }
@@ -47,8 +47,12 @@ bool sameVisible(const Agent& a, const Agent& b) {
 
 bool Agents::update(JsonObjectConst workspaces) {
   std::vector<Agent> next;
+  int groups = 0, tabs = 0, panes = 0;
   for (JsonObjectConst g : workspaces["groups"].as<JsonArrayConst>()) {
+    groups++;
     for (JsonObjectConst t : g["children"].as<JsonArrayConst>()) {
+      tabs++;
+      panes += t["paneCount"] | 1;
       if (!t["agent"].is<const char*>()) continue;  // shell tab
       Agent a;
       a.id = t["id"] | "";
@@ -79,7 +83,10 @@ bool Agents::update(JsonObjectConst workspaces) {
     return a.changedAt > b.changedAt;
   });
 
-  bool changed = !loaded_ || next.size() != list_.size();
+  bool changed = !loaded_ || next.size() != list_.size() || groups != workspaces_ || tabs != tabs_ || panes != panes_;
+  workspaces_ = groups;
+  tabs_ = tabs;
+  panes_ = panes;
   for (size_t i = 0; !changed && i < next.size(); i++) changed = !sameVisible(next[i], list_[i]);
   list_ = std::move(next);
   loaded_ = true;
@@ -88,6 +95,7 @@ bool Agents::update(JsonObjectConst workspaces) {
 
 void Agents::clear() {
   list_.clear();
+  workspaces_ = tabs_ = panes_ = 0;
   loaded_ = false;
 }
 

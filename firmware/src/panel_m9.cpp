@@ -127,6 +127,8 @@ bool nextPage() {
   return false;
 }
 
+void setBacklight(bool on) { digitalWrite(TFT_BL, on ? TFT_BL_ON : !TFT_BL_ON); }
+
 void dump(uint8_t) {
   uint16_t* buf = canvas->getBuffer();
   if (!buf) {

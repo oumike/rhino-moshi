@@ -31,6 +31,7 @@
 #define TFT_SPI_HZ 40000000
 // Through a PNP transistor, so active low.
 #define TFT_BL_ON LOW
+#define HAS_BACKLIGHT 1
 
 // The panel and keyboard sit on a switched rail: low powers it.
 #define PIN_VEXT 18

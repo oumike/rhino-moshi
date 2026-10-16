@@ -46,6 +46,12 @@ opens a tunnel (an SSH `direct-tcpip` channel, the same thing `ssh -W` does) to
    only the gateway tunnel, and `command="false"` makes any attempt to run a
    shell or command exit immediately. Requires OpenSSH 7.2+. A stolen X4 can do what the X4 already
    does, and nothing more. To revoke it, delete the line.
+
+   The M9's line forces `command="/usr/bin/top -l 1 -n 0 -s 0"` instead of
+   `"false"`: whatever it asks to run, the host runs that one read-only `top`,
+   which the Home dashboard reads for the host's CPU, load and memory (macOS
+   hosts). An M9 paired before this still works, but its dashboard asks for
+   the line to be pasted again.
 3. **Add the host on the X4:** a name, address, SSH port and user, entered on
    the settings page. Up to four hosts can be set up; Menu → Hosts on the X4
    switches between them.
@@ -62,7 +68,7 @@ opens a tunnel (an SSH `direct-tcpip` channel, the same thing `ssh -W` does) to
 | Someone on the LAN talks to moshi-hook | The gateway never leaves loopback. Only SSH is exposed, and SSH already guards the machine. |
 | Network eavesdropping or tampering | All traffic runs inside SSH (encrypted and integrity-checked). |
 | Spoofed host / man-in-the-middle | The host key is pinned on first use, and any change blocks the connection. |
-| Lost or stolen X4 | The key is restricted to `permitopen="127.0.0.1:24543"`. Remove its `authorized_keys` line on each host. |
+| Lost or stolen X4 | The key is restricted to `permitopen="127.0.0.1:24543"` (and, on the M9, to running a fixed `top`). Remove its `authorized_keys` line on each host. |
 | Someone reads the key off the X4 | The private key lives in NVS. Enabling ESP32 flash encryption is optional hardening; without it, physical access is game over, and the restriction above bounds the damage. |
 | Settings page abuse | The page is open on the LAN by default; set a page password on it to require HTTP Basic auth. The open setup access point runs only on a fresh install or with Back held at boot (physical access). The page shows the public key and accepts settings; the private key can't be read or exported. |
 
@@ -284,12 +290,19 @@ behind seams:
   Terminus (OFL; licence in `src/fonts/OFL-TermMono.txt`).
 - On the M9, typing on an agent's screens starts a prompt with that letter,
   Enter sends it, Del deletes and holding Del cancels.
-- The M9 boots to a dashboard, which Home returns to: session counts by
-  state, every session with its state and age (Up/Down select, Enter opens,
-  Right shows the full list), the watched session's model and context left
-  when known, and each account's 5h/7d limits with time to reset. The
-  far-left Messages key opens the selected session's conversation; pressed
-  there, it opens the session list.
+- The M9 boots to a dashboard, which Home returns to: moshi-hook's version,
+  licence and whether an update is out (`POST /v1/update/check`, every 6 h);
+  the host's CPU, load and memory (its forced `top`, every 5 s while shown);
+  each account's 5h/7d limits with time to reset; agent counts by state;
+  workspaces, tabs and panes; the dev servers and simulators moshi-hook's
+  doctor event reports; and the M9's own Wi-Fi signal, battery, uptime and
+  SSH round trip. Enter opens the session list. The far-left Messages key
+  opens the selected session's conversation; pressed there, it opens the
+  session list.
+- The backlight turns off after 30 seconds without a key press. Change it on
+  the settings page (Display) or with Menu → Screen off, which steps through
+  15 s to 10 min and Never. Any key wakes it without doing anything else, and
+  it wakes by itself when an agent starts waiting.
   In the conversation, Up and Down scroll two lines; a quick double tap
   scrolls a page (the keyboard reports taps only, never holds).
 

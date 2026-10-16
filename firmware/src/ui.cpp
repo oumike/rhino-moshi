@@ -168,17 +168,31 @@ int trMaxScroll = 0, trRows = 0;
 bool trHasMore = false;
 
 // The menu and its screens.
-enum { M_USAGE, M_HOSTS, M_DEVICE, M_FLIP, M_RESTART, M_COUNT };
-const char* const MENU_ITEMS[M_COUNT] = {"Usage", "Hosts", "Device", "Flip screen", "Restart"};
+enum { M_USAGE, M_HOSTS, M_DEVICE, M_FLIP, M_SCREEN, M_RESTART, M_COUNT };
+const char* const MENU_ITEMS[M_COUNT] = {"Usage", "Hosts", "Device", "Flip screen", "Screen off", "Restart"};
 // The M9's panel has one good orientation, so it drops Flip; every other item
 // is in order. The X4 keeps all of them.
 #if defined(BOARD_M9)
-const int MENU_ORDER[] = {M_USAGE, M_HOSTS, M_DEVICE, M_RESTART};
+const int MENU_ORDER[] = {M_USAGE, M_HOSTS, M_DEVICE, M_SCREEN, M_RESTART};
 #else
 const int MENU_ORDER[] = {M_USAGE, M_HOSTS, M_DEVICE, M_FLIP, M_RESTART};
 #endif
 const int MENU_LEN = sizeof(MENU_ORDER) / sizeof(MENU_ORDER[0]);
 int mainSel = 0;
+
+// The backlight goes off after this long without a key press (0: never). Any
+// key turns it back on, and is swallowed; so does an agent starting to wait.
+uint16_t screenTimeoutS = settings::DEFAULT_SCREEN_TIMEOUT;
+unsigned long lastKeyAt = 0;
+bool screenOff = false;
+size_t lastBlocked = 0;
+
+void setScreenOn(bool on) {
+  if (on == !screenOff) return;
+  screenOff = !on;
+  panel::setBacklight(on);
+  Serial.printf("[ui] screen %s\n", on ? "on" : "off");
+}
 int hostSel = 0, hostActive = 0;
 std::vector<HostConfig> hostList;  // read when the menu opens
 int usageFirst = 0;      // first account shown
@@ -1082,6 +1096,7 @@ void drawMenu(Gateway& gw, Agents& agents) {
       host,
       "Settings page, Wi-Fi, key, battery",
       "Turn the screen upside down",
+      (screenTimeoutS ? "After " + settings::screenTimeoutName(screenTimeoutS) : String("Never")) + ", Enter changes it",
       "Start the " BOARD_NAME " over",
   };
   std::vector<String> labels, hints;
@@ -1106,142 +1121,177 @@ String span(long d) {
 }
 
 #if HAS_DASHBOARD
-int homeFirst = 0;  // the first session row shown
-
-const char* shortState(AgentState s) {
-  switch (s) {
-    case AgentState::Blocked: return "wait";
-    case AgentState::Working: return "work";
-    case AgentState::Done: return "done";
-    case AgentState::Idle: return "idle";
-    default: return "?";
-  }
-}
-
-// Every session at a glance, with the plan limits under them.
+// The host, its limits, and this device at a glance; the sessions themselves
+// are a key away (Messages, or Enter for the list). Monospace rows: a muted
+// label column, then the value.
 void drawHome(Gateway& gw, Agents& agents) {
   header(gw, agents);
-  const int LH = MONO_LINE_H;
-  const int CW = 8;  // TermMono cell width
-  int y = HEADER_H + 4;
-
-  // Counts by state.
-  int n[5] = {};
-  for (size_t i = 0; i < agents.size(); i++) n[(int)agents[i].state]++;
+  const int LH = MONO_LINE_H, CW = 8;  // TermMono cell
+  const int VX = MARGIN + 8 * CW;      // values start after an 8-cell label
+  const int RX = W() - MARGIN;
+  int y = HEADER_H + 2;
   display.setFont(F_MONO);
-  int x = MARGIN;
-  auto part = [&](const String& t, uint16_t c) {
-    text(x, y + 12, t, F_MONO, c);
-    x += t.length() * CW + CW * 2;
+
+  auto label = [&](const String& l) { text(MARGIN, y + 12, l, F_MONO, color::MUTED); };
+  auto value = [&](const String& v, uint16_t c = color::FG) {
+    text(VX, y + 12, fit(v, RX - VX), F_MONO, c);
   };
-  if (gw.state() != LinkState::Online && !agents.loaded()) {
-    part(gw.state() == LinkState::Connecting ? "Connecting to host..." : "Not connected", color::MUTED);
-  } else if (!agents.loaded()) {
-    part("Loading sessions...", color::MUTED);
+  // A value drawn as a bar with text after it, e.g. "[====    ] 27% 2.05".
+  auto bar = [&](int x, float frac, const String& right, uint16_t rc, bool warn) {
+    int rx = RX - right.length() * CW;
+    text(rx, y + 12, right, F_MONO, rc);
+    int bw = rx - CW - x;
+    if (bw < 12) return;
+    display.drawRect(x, y + 4, bw, 8, color::RULE);
+    display.fillRect(x + 2, y + 6, (int)((bw - 4) * constrain(frac, 0.0f, 1.0f)), 4, warn ? color::BLOCKED : color::BAR);
+  };
+  auto rule = [&] {
+    y += 3;
+    display.drawFastHLine(MARGIN, y, W() - 2 * MARGIN, color::RULE);
+    y += 2;
+  };
+  auto pad = [](String s, unsigned n) {
+    while (s.length() < n) s = " " + s;
+    return s;
+  };
+
+  // moshi-hook and the host's load.
+  const HostInfo& info = gw.hostInfo();
+  label("MOSHI");
+  {
+    String v = info.version.length() ? info.version : String("?");
+    if (info.doctor) v += info.pro ? "  Pro" : "  Free";
+    value(v);
+    if (info.updateAvailable) {
+      String up = info.latest + " available";
+      text(RX - up.length() * CW, y + 12, up, F_MONO, color::BLOCKED);
+    } else if (info.updateChecked) {
+      text(RX - 10 * CW, y + 12, "up to date", F_MONO, color::DONE);
+    }
+  }
+  y += LH;
+#if HAS_HOST_STATS
+  const HostStats& st = gw.hostStats();
+  label("CPU");
+  if (st.ok) {
+    char load[12];
+    snprintf(load, sizeof(load), "%.2f", st.load);
+    bar(VX, st.cpu / 100, pad(String((int)(st.cpu + 0.5f)) + "%", 4) + " ld " + load, color::FG, st.cpu >= 90);
+    y += LH;
+    label("MEM");
+    char mem[24];
+    snprintf(mem, sizeof(mem), "%.1f/%.0fG", st.memUsedMB / 1024.0f, st.memTotalMB / 1024.0f);
+    float frac = st.memTotalMB ? (float)st.memUsedMB / st.memTotalMB : 0;
+    bar(VX, frac, mem, color::FG, frac >= 0.95f);
   } else {
-    part(String(agents.size()) + (agents.size() == 1 ? " session" : " sessions"), color::FG);
-    if (n[(int)AgentState::Blocked]) part(String(n[(int)AgentState::Blocked]) + " waiting", color::BLOCKED);
-    if (n[(int)AgentState::Working]) part(String(n[(int)AgentState::Working]) + " working", color::WORKING);
-    if (n[(int)AgentState::Done]) part(String(n[(int)AgentState::Done]) + " done", color::DONE);
+    value(st.tried ? st.error : String("reading..."), st.tried ? color::BLOCKED : color::MUTED);
+    if (st.tried) {
+      y += LH;
+      value("re-paste the device key line", color::MUTED);
+    }
+  }
+  y += LH;
+#endif
+
+  // Plan limits, as many windows as fit.
+  rule();
+  time_t now = time(nullptr);
+  bool clock = now > 1700000000;
+  const std::vector<UsageAccount>& accs = gw.usage().accounts();
+  const int BOTTOM_ROWS = 5;  // agents, spaces, servers, sims, device
+  int room = max(1, (H() - y - 10 - BOTTOM_ROWS * LH) / LH);
+  int shown = 0, total = 0;
+  for (const UsageAccount& a : accs) total += a.windows.size();
+  if (!total) {
+    label("USAGE");
+    value(gw.usage().received() ? "no accounts" : "waiting...", color::MUTED);
+    y += LH;
+  }
+  for (const UsageAccount& a : accs) {
+    for (const UsageWindow& w : a.windows) {
+      if (shown == room - 1 && total > room) {
+        label("USAGE");
+        value("+" + String(total - shown) + " more in Menu > Usage", color::MUTED);
+        y += LH;
+        shown = total;
+        break;
+      }
+      if (shown >= room) break;
+      String name = agentName(a.agent);
+      label(name.length() > 7 ? name.substring(0, 7) : name);
+      String wl = ascii(w.label);
+      text(VX, y + 12, wl, F_MONO);
+      String reset = clock && w.resetsAt > 0 ? span(max(0L, (long)(w.resetsAt - now))) : String();
+      bar(VX + (wl.length() + 1) * CW, w.used / 100.0f, pad(String(w.used) + "%", 4) + pad(reset, 7),
+          w.used >= 90 ? color::BLOCKED : color::FG, w.used >= 90);
+      y += LH;
+      shown++;
+    }
+  }
+
+  // What's running on the host.
+  rule();
+  label("AGENTS");
+  {
+    int n[5] = {};
+    for (size_t i = 0; i < agents.size(); i++) n[(int)agents[i].state]++;
+    int x = VX;
+    auto part = [&](const String& t, uint16_t c) {
+      if (x + (int)t.length() * CW > RX) return;
+      text(x, y + 12, t, F_MONO, c);
+      x += (t.length() + 1) * CW;
+    };
+    if (!agents.loaded()) part("loading...", color::MUTED);
+    else {
+      part(String(agents.size()), color::FG);
+      if (n[(int)AgentState::Blocked]) part(String(n[(int)AgentState::Blocked]) + " waiting", color::BLOCKED);
+      if (n[(int)AgentState::Working]) part(String(n[(int)AgentState::Working]) + " working", color::WORKING);
+      if (n[(int)AgentState::Done]) part(String(n[(int)AgentState::Done]) + " done", color::DONE);
+      if (n[(int)AgentState::Idle]) part(String(n[(int)AgentState::Idle]) + " idle", color::IDLE);
+    }
+  }
+  y += LH;
+  label("SPACES");
+  if (agents.loaded()) {
+    int ws = agents.workspaceCount(), tabs = agents.tabCount(), panes = agents.paneCount();
+    value(String(ws) + (ws == 1 ? " workspace " : " workspaces ") + String(tabs) + (tabs == 1 ? " tab " : " tabs ") +
+          String(panes) + (panes == 1 ? " pane" : " panes"));
+  }
+  y += LH;
+  label("SERVERS");
+  if (!info.doctor) value("...", color::MUTED);
+  else if (info.servers.empty()) value("none", color::MUTED);
+  else {
+    String v;
+    for (const HostInfo::Server& sv : info.servers) {
+      String one = ":" + String(sv.port) + " " + ascii(sv.process.length() ? sv.process : sv.name);
+      v += (v.length() ? "  " : "") + one;
+    }
+    value(v);
+  }
+  y += LH;
+  label("SIMS");
+  if (!info.doctor) value("...", color::MUTED);
+  else if (info.simulators.empty()) value("none", color::MUTED);
+  else {
+    String v;
+    for (const String& m : info.simulators) v += (v.length() ? ", " : "") + ascii(m);
+    value(v);
   }
   y += LH;
 
-  // The model and context left are only known for the watched session.
-  int wi = agents.indexOf(gw.watchedId());
-  String info = wi >= 0 ? infoText(gw, agents[wi]) : String();
-  if (info.length()) {
-    info.replace(" - ", ", ");
-    String who = ascii(agents[wi].workspace);
-    String line = who + ": " + info;
-    text(MARGIN, y + 12, fit(line, W() - 2 * MARGIN), F_MONO, color::MUTED);
-    y += LH;
-  }
-  y += 4;
-
-  // Usage windows take the bottom; sessions get what is left.
-  time_t now = time(nullptr);
-  bool clock = now > 1700000000;
-  struct Win { String name; const UsageWindow* w; };
-  std::vector<Win> wins;
-  for (const UsageAccount& a : gw.usage().accounts())
-    for (const UsageWindow& w : a.windows) wins.push_back({agentName(a.agent), &w});
-  const int MAX_WINS = 4;
-  int shownWins = min((int)wins.size(), MAX_WINS);
-  int usageH = shownWins ? 6 + LH * shownWins : 0;
-  int listTop = y + LH;
-  int rows = max(1, (H() - usageH - listTop) / LH);
-
-  display.setFont(F_SMALL);
-  int lw = textWidth("SESSIONS");
-  text(MARGIN, y + 12, "SESSIONS", F_SMALL, color::MUTED);
-  display.drawFastHLine(MARGIN + lw + 6, y + 8, W() - 2 * MARGIN - lw - 6, color::RULE);
-  y = listTop;
-  int count = agents.size();
-  if (cursor < homeFirst) homeFirst = cursor;
-  if (cursor >= homeFirst + rows) homeFirst = cursor - rows + 1;
-  homeFirst = constrain(homeFirst, 0, max(0, count - rows));
-  if (agents.loaded() && !count) text(MARGIN, y + 12, "No agents running.", F_MONO, color::MUTED);
-  for (int r = 0; r < rows && homeFirst + r < count; r++) {
-    int i = homeFirst + r;
-    const Agent& a = agents[i];
-    bool sel = i == cursor;
-    uint16_t fg = sel ? color::SEL_FG : color::FG;
-    if (sel) display.fillRect(0, y, W(), LH, color::SEL_BG);
-    display.fillCircle(MARGIN + 3, y + LH / 2, 3, stateColor(a.state));
-    String right = String(shortState(a.state));
-    String ago = age(a.changedAt, a.approx);
-    if (ago.length()) right += " " + ago;
-    if (a.unseen) right = "* " + right;
-    int rx = W() - MARGIN - right.length() * CW;
-    text(rx, y + 12, right, F_MONO, sel ? fg : stateColor(a.state));
-    String name = ascii(a.workspace);
-    if (a.tab.length() && a.tab != "1") name += "/" + ascii(a.tab);
-    String kind = ascii(a.kind);
-    int nx = MARGIN + 12;
-    int room = (rx - nx) / CW - 1;
-    if (kind.length() && (int)(name.length() + kind.length()) + 1 <= room) {
-      text(nx, y + 12, name, F_MONO, fg);
-      text(nx + (name.length() + 1) * CW, y + 12, kind, F_MONO, sel ? fg : color::MUTED);
-    } else {
-      display.setFont(F_MONO);
-      text(nx, y + 12, fit(name, rx - nx - CW), F_MONO, fg);
-    }
-    y += LH;
-  }
-  if (count > homeFirst + rows) {
-    String more = "+" + String(count - homeFirst - rows);
-    display.setFont(F_SMALL);
-    text(W() - MARGIN - textWidth(more), H() - usageH - 2, more, F_SMALL, color::MUTED);
-  }
-
-  if (!shownWins) return;
-  y = H() - usageH;
-  display.drawFastHLine(MARGIN, y + 2, W() - 2 * MARGIN, color::RULE);
-  y += 6;
-  for (int k = 0; k < shownWins; k++) {
-    const UsageWindow& w = *wins[k].w;
-    // "Claude 5h [bar] 12% 3h20m"
-    String left = wins[k].name;
-    if (left.length() > 7) left = left.substring(0, 7);
-    while (left.length() < 7) left += ' ';
-    left += " " + ascii(w.label);
-    while (left.length() < 11) left += ' ';
-    text(MARGIN, y + 12, left, F_MONO, color::FG);
-    String pct = String(w.used) + "%";
-    while (pct.length() < 4) pct = " " + pct;
-    String reset = clock && w.resetsAt > 0 ? span(max(0L, (long)(w.resetsAt - now))) : String();
-    while (reset.length() < 7) reset = " " + reset;
-    String right = pct + " " + reset;
-    int rx = W() - MARGIN - right.length() * CW;
-    text(rx, y + 12, pct, F_MONO, w.used >= 90 ? color::BLOCKED : color::FG);
-    text(rx + (pct.length() + 1) * CW, y + 12, reset, F_MONO, color::MUTED);
-    int bx = MARGIN + 12 * CW, bw = rx - CW - bx, bh = 8;
-    if (bw > 10) {
-      display.drawRect(bx, y + 4, bw, bh, color::RULE);
-      display.fillRect(bx + 2, y + 6, (bw - 4) * min(w.used, 100) / 100, bh - 4,
-                       w.used >= 90 ? color::BLOCKED : color::BAR);
-    }
-    y += LH;
+  // This device.
+  rule();
+  label("M9");
+  {
+    float volts = analogReadMilliVolts(PIN_BATTERY_ADC) * BATTERY_DIVIDER / 1000.0f;
+    char v[48];
+    snprintf(v, sizeof(v), "%ddBm %.2fV up %s", (int)WiFi.RSSI(), volts, span(millis() / 1000).c_str());
+    String s = v;
+#if HAS_HOST_STATS
+    if (st.tried && st.rttMs) s += " " + String(st.rttMs) + "ms";
+#endif
+    value(s);
   }
 }
 #endif
@@ -1767,6 +1817,15 @@ bool menuInput(Buttons& b) {
 #endif
       lastView = View::None;  // redraw all of it, the other way up
       break;
+    case M_SCREEN: {
+      const size_t n = sizeof(settings::SCREEN_TIMEOUTS) / sizeof(settings::SCREEN_TIMEOUTS[0]);
+      size_t i = 0;
+      while (i < n && settings::SCREEN_TIMEOUTS[i] != screenTimeoutS) i++;
+      screenTimeoutS = settings::SCREEN_TIMEOUTS[(i + 1) % n];  // an unlisted value starts over
+      settings::saveScreenTimeout(screenTimeoutS);
+      lastKeyAt = millis();
+      break;
+    }
     case M_RESTART:
       restartAfterDraw = true;
       showNotice("Restarting...");
@@ -1870,14 +1929,8 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
 #if HAS_DASHBOARD
     case View::Home:
       if (b.wasPressed(BTN_BACK)) openMenu();
-      else if (b.wasPressed(BTN_DOWN)) moveCursor(agents, 1);
-      else if (b.wasPressed(BTN_UP)) moveCursor(agents, -1);
-      else if (b.wasPressed(BTN_RIGHT)) screen = Screen::List;
-      else if (b.wasPressed(BTN_CONFIRM) && agents.size()) {
-        screen = Screen::Detail;
-        agents.markSeen(selectedId);
-        agents.setDismissed(selectedId, false);
-      } else return false;
+      else if (b.wasPressed(BTN_CONFIRM) || b.wasPressed(BTN_RIGHT)) screen = Screen::List;
+      else return false;
       return true;
 #endif
     case View::List: {
@@ -1970,6 +2023,8 @@ void begin() {
   rotation = settings::rotation();
 #endif
   panel::begin(rotation);
+  screenTimeoutS = settings::screenTimeout();
+  lastKeyAt = millis();
 }
 
 void dumpScreen() { panel::dump(rotation); }
@@ -2054,7 +2109,25 @@ static void updateLocked(Gateway& gw, Agents& agents, Buttons& buttons, bool cha
   // after it was on screen count; the rest were aimed at whatever was there
   // before. Sends start at once and report back through finishSend().
   bool dirty = false;
+#if HAS_BACKLIGHT
+  bool waking = false;
+  if (buttons.hasEvent()) {
+    lastKeyAt = millis();
+    waking = screenOff;
+    setScreenOn(true);
+  }
+  size_t blocked = agents.blockedCount();
+  if (blocked > lastBlocked) {
+    lastKeyAt = millis();
+    setScreenOn(true);
+  }
+  lastBlocked = blocked;
+  if (!screenOff && screenTimeoutS && millis() - lastKeyAt >= screenTimeoutS * 1000UL) setScreenOn(false);
+#endif
   do {
+#if HAS_BACKLIGHT
+    if (waking) continue;  // the press that woke the screen does nothing else
+#endif
     if (buttons.hasEvent() && view == View::Card &&
         (lastView != View::Card || shownCardKey != cardKey || buttons.eventAt() < cardShownAt))
       continue;
@@ -2072,6 +2145,9 @@ static void updateLocked(Gateway& gw, Agents& agents, Buttons& buttons, bool cha
   unsigned long now = millis();
   // Don't slow typing down with redraws for the gateway.
   bool typing = view == View::Keyboard;
+#if HAS_DASHBOARD
+  gw.wantHostStats(view == View::Home);
+#endif
   if (pending && !typing && now - lastDrawAt >= MIN_REDRAW_MS) dirty = true;
   if (redrawNow) dirty = true;
   if (notice.length() && !noticeShown()) {

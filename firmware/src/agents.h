@@ -40,6 +40,10 @@ class Agents {
 
   bool loaded() const { return loaded_; }
   size_t size() const { return list_.size(); }
+  // Everything open on the host, agent or not.
+  int workspaceCount() const { return workspaces_; }
+  int tabCount() const { return tabs_; }
+  int paneCount() const { return panes_; }
   const Agent& operator[](size_t i) const { return list_[i]; }
   int indexOf(const String& id) const;
   size_t blockedCount() const;
@@ -58,6 +62,7 @@ class Agents {
  private:
   std::vector<Agent> list_;
   bool loaded_ = false;
+  int workspaces_ = 0, tabs_ = 0, panes_ = 0;
 };
 
 AgentState parseState(const char* s);

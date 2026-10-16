@@ -89,6 +89,8 @@ void startFrame(bool full, uint8_t rotation) {
 
 bool nextPage() { return display.nextPage(); }
 
+void setBacklight(bool) {}
+
 void dump(uint8_t rotation) {
   const uint8_t* f = X4Panel::lastFrame;
   if (!f) {

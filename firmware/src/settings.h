@@ -31,6 +31,14 @@ void saveWifi(const WifiConfig& wifi);
 uint8_t rotation();
 void saveRotation(uint8_t rotation);
 
+// Seconds without a key press before the backlight turns off; 0 is never.
+const uint16_t DEFAULT_SCREEN_TIMEOUT = 30;
+uint16_t screenTimeout();
+// The choices offered, in order, and how each reads.
+const uint16_t SCREEN_TIMEOUTS[] = {15, 30, 60, 120, 300, 600, 0};
+String screenTimeoutName(uint16_t seconds);
+void saveScreenTimeout(uint16_t seconds);
+
 // Password for the settings web page. Empty means the page is open.
 String webPassword();
 void saveWebPassword(const String& password);

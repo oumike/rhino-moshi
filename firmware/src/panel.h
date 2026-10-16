@@ -23,6 +23,9 @@ void startFrame(bool full, uint8_t rotation);
 // does: up to ~2 s for a full e-paper refresh, ~20 ms on the TFT.
 bool nextPage();
 
+// Turns a backlit screen's light on or off; nothing on e-paper.
+void setBacklight(bool on);
+
 // Writes the last frame to serial for tools/x4log.py: base64 between a header
 // line and "END". The X4 sends "SHOT <w> <h> <rotation>" and its 1-bit RAM in
 // native orientation; the M9 "SHOT565 <w> <h>" and RGB565 as drawn.

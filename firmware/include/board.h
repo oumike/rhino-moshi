@@ -33,6 +33,10 @@ enum ButtonIndex : uint8_t {
 #ifndef DISPLAY_EPAPER
 #define DISPLAY_EPAPER 0
 #endif
+// A backlit screen, turned off after the screen timeout (e-paper needs none).
+#ifndef HAS_BACKLIGHT
+#define HAS_BACKLIGHT 0
+#endif
 // A keyboard to type prompts on, rather than the on-screen one.
 #ifndef HAS_KEYBOARD
 #define HAS_KEYBOARD 0
@@ -48,6 +52,13 @@ enum ButtonIndex : uint8_t {
 // scrollable conversation transcript and compose prompts inline (M9).
 #ifndef HAS_TRANSCRIPT
 #define HAS_TRANSCRIPT HAS_KEYBOARD
+#endif
+
+// The M9's Home dashboard shows the host's CPU and memory, read by running
+// top over SSH. Its key's forced command is that top instead of "false", so
+// it still can't run anything else.
+#ifndef HAS_HOST_STATS
+#define HAS_HOST_STATS HAS_TRANSCRIPT
 #endif
 
 // The M9's small landscape layout. PREVIEW_COMPACT draws it on an X4, in the

@@ -128,7 +128,13 @@ void handleRoot() {
   }
 
   b += F("<h2>Device key</h2><p class=hint>Append this line to <code>~/.ssh/authorized_keys</code> on each host. "
-         "It only allows a tunnel to moshi-hook's gateway: no shell, no commands, no other ports.</p>"
+         "It only allows a tunnel to moshi-hook's gateway: no shell, no other ports"
+#if HAS_HOST_STATS
+         ", and no command but <code>top</code>, read for the host's CPU and memory."
+#else
+         ", no commands."
+#endif
+         "</p>"
          "<textarea readonly rows=5 onclick='this.select()'>");
   b += esc(keyLine);
   b += F("</textarea>");
@@ -137,6 +143,19 @@ void handleRoot() {
   b += String("<option value=3") + (rot != 1 ? " selected" : "") + ">Portrait</option>";
   b += String("<option value=1") + (rot == 1 ? " selected" : "") + ">Portrait, upside down</option>";
   b += F("</select>");
+#if HAS_BACKLIGHT
+  {
+    uint16_t cur = settings::screenTimeout();
+    b += F("<label>Screen off after</label><select name=screen_off>");
+    bool found = false;
+    for (uint16_t s : settings::SCREEN_TIMEOUTS) {
+      found |= s == cur;
+      b += "<option value=" + String(s) + (s == cur ? " selected>" : ">") + settings::screenTimeoutName(s) + "</option>";
+    }
+    if (!found) b += "<option value=" + String(cur) + " selected>" + String(cur) + " seconds</option>";
+    b += F("</select>");
+  }
+#endif
 
   b += F("<h2>Prompts</h2><p class=hint>Canned prompts for the " BOARD_NAME "'s Prompt menu, one per line, in order (up to "
          "20).</p><textarea name=prompts rows=8 style='font-family:inherit;font-size:1em'>");
@@ -276,6 +295,7 @@ void handleSave() {
 
   settings::saveRotation(server.arg("rotation").toInt() == 1 ? 1 : 3);
   if (server.hasArg("prompts")) settings::savePrompts(server.arg("prompts"));
+  if (server.hasArg("screen_off")) settings::saveScreenTimeout(constrain(server.arg("screen_off").toInt(), 0, 3600));
 
   if (server.hasArg("clear_pw")) {
     settings::saveWebPassword("");

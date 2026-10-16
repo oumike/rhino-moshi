@@ -19,6 +19,47 @@ const int MAX_MESSAGES_PER_POLL = 4;
 // the transcript socket's buffer; several rows fold into one shown message.
 const int TRANSCRIPT_LIMIT = 24;
 
+#if HAS_HOST_STATS
+const unsigned long STATS_EVERY_MS = 5000;
+#endif
+const unsigned long UPDATE_CHECK_EVERY_MS = 6UL * 3600 * 1000;
+
+// "15G", "338M", "512K" in megabytes.
+float toMB(const char* p) {
+  char* end;
+  float v = strtof(p, &end);
+  switch (*end) {
+    case 'T': return v * 1024 * 1024;
+    case 'G': return v * 1024;
+    case 'K': return v / 1024;
+    case 'B': return v / (1024 * 1024);
+    default: return v;
+  }
+}
+
+// macOS `top -l 1 -n 0`: "Processes: 811 total, ...", "Load Avg: 2.05, ...",
+// "CPU usage: 13.65% user, 13.21% sys, 73.12% idle", and
+// "PhysMem: 15G used (2230M wired, 4518M compressor), 338M unused."
+bool parseTop(const String& s, HostStats& st) {
+  const char* t = s.c_str();
+  const char* p;
+  if ((p = strstr(t, "Processes: "))) st.processes = atoi(p + 11);
+  if ((p = strstr(t, "Load Avg: "))) st.load = atof(p + 10);
+  float user, sys;
+  p = strstr(t, "CPU usage: ");
+  if (!p || sscanf(p + 11, "%f%% user, %f%% sys", &user, &sys) != 2) return false;
+  st.cpu = user + sys;
+  p = strstr(t, "PhysMem: ");
+  if (!p) return false;
+  float used = toMB(p + 9);
+  const char* un = strstr(p, "), ");
+  const char* eol = strchr(p, '\n');
+  if (!un || (eol && un > eol)) return false;
+  st.memUsedMB = used;
+  st.memTotalMB = used + toMB(un + 3);
+  return st.memTotalMB > 0;
+}
+
 const char* REQUIRED_CAPS[] = {"events.watch.workspaces", "events.watch.agent-status", "approvals.answer"};
 
 }  // namespace
@@ -42,6 +83,8 @@ void Gateway::switchHost(int index) {
   host_ = settings::loadHost();
   agents_.clear();
   usage_.clear();
+  info_ = HostInfo();
+  stats_ = HostStats();
   card_.clear();
   watchId_ = watchSource_ = watchSession_ = answeredKey_ = "";
   transcript_.clear();
@@ -198,6 +241,10 @@ void Gateway::attempt() {
   Serial.printf("[gw] online: moshi-hook %s on %s, %lu ms\n", (const char*)(version["version"] | "?"),
                 (const char*)(version["hostname"] | "?"), millis() - t0);
   state_ = LinkState::Online;
+  info_.version = (const char*)(version["version"] | "");
+  info_.hostname = (const char*)(version["hostname"] | "");
+  updateAt_ = 0;  // check now, then every few hours
+  statsAt_ = 0;
   detail_ = "";
   backoffMs_ = 0;
   nextAttemptAt_ = 0;
@@ -276,6 +323,10 @@ void Gateway::pollOnline() {
     ws_.trim();
   }
   pollTranscript();
+#if HAS_HOST_STATS
+  if (wantStats_ && (!statsAt_ || millis() - statsAt_ >= STATS_EVERY_MS)) pollHostStats();
+#endif
+  if (!updateAt_ || millis() - updateAt_ >= UPDATE_CHECK_EVERY_MS) checkUpdate();
   unsigned long now = millis();
   unsigned long quiet = now - ws_.lastReceived();
   if (quiet > DEAD_AFTER_MS) {
@@ -469,6 +520,7 @@ bool Gateway::handleMessage() {
     else if (JsonObjectConst ws = doc["workspaces"]) changed |= agents_.update(ws);
   }
   if (watchSession_.length() && strstr(msg, "\"agentStatus\":{")) changed |= handleAgentStatus();
+  if (strstr(msg, "\"simulators\":")) changed |= handleDoctor();
   if (strstr(msg, "\"usage\":[")) {
     static JsonDocument usageFilter;
     if (usageFilter.isNull()) Usage::buildFilter(usageFilter);
@@ -489,6 +541,87 @@ bool Gateway::handleMessage() {
     }
   }
   return changed;
+}
+
+// The doctor event, either bare or under "doctor": servers and simulators
+// found on the host, and the licence.
+bool Gateway::handleDoctor() {
+  static JsonDocument filter;
+  if (filter.isNull()) {
+    for (JsonObject f : {filter.to<JsonObject>(), filter["doctor"].to<JsonObject>()}) {
+      JsonObject s = f["servers"][0].to<JsonObject>();
+      s["port"] = s["process"] = s["name"] = true;
+      JsonObject m = f["simulators"][0].to<JsonObject>();
+      m["name"] = m["deviceName"] = m["state"] = true;
+      f["license"]["pro"] = true;
+    }
+  }
+  JsonDocument doc;
+  DeserializationError err =
+      deserializeJson(doc, ws_.message(), ws_.messageLength(), DeserializationOption::Filter(filter));
+  if (err) {
+    Serial.printf("[gw] doctor frame: %s\n", err.c_str());
+    return false;
+  }
+  JsonObjectConst d = doc["doctor"].is<JsonObjectConst>() ? doc["doctor"].as<JsonObjectConst>()
+                                                           : doc.as<JsonObjectConst>();
+  info_.doctor = true;
+  info_.pro = d["license"]["pro"] | false;
+  info_.servers.clear();
+  for (JsonObjectConst s : d["servers"].as<JsonArrayConst>())
+    info_.servers.push_back({(uint16_t)(s["port"] | 0), s["process"] | "", s["name"] | ""});
+  info_.simulators.clear();
+  for (JsonObjectConst m : d["simulators"].as<JsonArrayConst>()) {
+    const char* name = m["name"] | (m["deviceName"] | "simulator");
+    info_.simulators.push_back(name);
+  }
+  Serial.printf("[gw] doctor: %u servers, %u simulators\n", (unsigned)info_.servers.size(),
+                (unsigned)info_.simulators.size());
+  return true;
+}
+
+#if HAS_HOST_STATS
+// Network task, unlocked.
+void Gateway::pollHostStats() {
+  String out;
+  unsigned long rtt = 0;
+  int status = link_.exec(HOST_COMMAND, out, 2048, &rtt);
+  HostStats st;
+  st.tried = true;
+  st.rttMs = rtt;
+  if (status < 0) st.error = "SSH: " + link_.error();
+  else if (out.isEmpty()) st.error = "key's command isn't top";
+  else if (!parseTop(out, st)) st.error = "unreadable top output";
+  else st.ok = true;
+  if (st.ok) Serial.printf("[gw] host stats: cpu %.0f%% load %.2f mem %u/%u MB, rtt %lu ms\n", st.cpu, st.load,
+                          (unsigned)st.memUsedMB, (unsigned)st.memTotalMB, rtt);
+  if (!st.ok) Serial.printf("[gw] host stats: %s (exit %d)\n", st.error.c_str(), status);
+  Guard g(*this);
+  if (linkGen_ != gen_) return;
+  statsAt_ = millis();
+  stats_ = st;
+  changed_ = true;
+}
+#endif
+
+// Network task, unlocked. Asks moshi-hook whether a newer release exists.
+void Gateway::checkUpdate() {
+  updateAt_ = millis();
+  String body;
+  int status = gatewayRequest(link_, "POST", "/v1/update/check", "{}", body, 2048);
+  JsonDocument doc;
+  if (status != 200 || deserializeJson(doc, body)) {
+    Serial.printf("[gw] update check: HTTP %d\n", status);
+    return;
+  }
+  Guard g(*this);
+  if (linkGen_ != gen_) return;
+  info_.updateChecked = true;
+  info_.updateAvailable = doc["update"]["available"] | false;
+  info_.latest = (const char*)(doc["update"]["latest"] | "");
+  if (info_.latest.startsWith("v")) info_.latest.remove(0, 1);
+  Serial.printf("[gw] update check: latest %s%s\n", info_.latest.c_str(), info_.updateAvailable ? " (available)" : "");
+  changed_ = true;
 }
 
 bool Gateway::startRequest(Request kind, const char* path, const String& body, String& error) {
