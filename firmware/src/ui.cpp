@@ -460,7 +460,8 @@ String usageSummary(const Usage& u) {
   return w ? ascii(w->label) + " " + String(w->used) + "%" : String();
 }
 
-void header(Gateway& gw, Agents& agents) {
+// Plan usage is only summarised in the header on Home.
+void header(Gateway& gw, Agents& agents, bool showUsage = false) {
   String right;
   uint16_t rc = color::MUTED;
   switch (gw.state()) {
@@ -476,7 +477,7 @@ void header(Gateway& gw, Agents& agents) {
   display.setFont(rf);
   int rw = textWidth(right);
   text(W() - MARGIN - rw, S(36), right, rf, rc);
-  String use = usageSummary(gw.usage());
+  String use = showUsage ? usageSummary(gw.usage()) : String();
   if (use.length()) {
     display.setFont(F_SMALL);
     rw += textWidth(use) + S(16);
@@ -1172,7 +1173,7 @@ String span(long d) {
 // are a key away (Messages, or Enter for the list). Monospace rows: a muted
 // label column, then the value.
 void drawHome(Gateway& gw, Agents& agents) {
-  header(gw, agents);
+  header(gw, agents, true);
   const int LH = MONO_LINE_H, CW = MONO_CW, BASE = MONO_BASE;
   const int VX = MARGIN + 8 * CW;      // values start after an 8-cell label
   const int RX = W() - MARGIN;
