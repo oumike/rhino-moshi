@@ -152,6 +152,10 @@ bool kbShift = false, kbSym = false, backHoldFired = false;
 // following the newest, and what the last draw measured (for the input task).
 int trScroll = 0;
 bool trFollow = true;
+// A second tap of the same direction this soon after the first pages instead.
+const unsigned long DOUBLE_TAP_MS = 400;
+int trLastDir = 0;
+unsigned long trLastDirAt = 0;
 int trMaxScroll = 0, trRows = 0;
 bool trHasMore = false;
 
@@ -1727,18 +1731,25 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
           agents.setDismissed(selectedId, false);
           openCard(Screen::Detail);
         } else return false;
-      } else if (b.wasPressed(BTN_UP)) {
-        if (trScroll <= 0) {
-          if (trHasMore) gw.requestOlderTranscript();
-          else return false;
+      } else if (b.wasPressed(BTN_UP) || b.wasPressed(BTN_DOWN)) {
+        int dir = b.wasPressed(BTN_DOWN) ? 1 : -1;
+        bool page = dir == trLastDir && b.eventAt() - trLastDirAt < DOUBLE_TAP_MS;
+        trLastDir = dir;
+        trLastDirAt = b.eventAt();
+        int step = page ? max(1, trRows - 1) : STEP;
+        if (dir < 0) {
+          if (trScroll <= 0) {
+            if (trHasMore) gw.requestOlderTranscript();
+            else return false;
+          } else {
+            trScroll = max(0, trScroll - step);
+            trFollow = false;
+          }
         } else {
-          trScroll = max(0, trScroll - STEP);
-          trFollow = false;
+          if (trScroll >= trMaxScroll) return false;
+          trScroll = min(trMaxScroll, trScroll + step);
+          trFollow = trScroll >= trMaxScroll;
         }
-      } else if (b.wasPressed(BTN_DOWN)) {
-        if (trScroll >= trMaxScroll) return false;
-        trScroll = min(trMaxScroll, trScroll + STEP);
-        trFollow = trScroll >= trMaxScroll;
       } else return false;
       agents.markSeen(selectedId);
       return true;

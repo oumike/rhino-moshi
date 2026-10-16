@@ -283,6 +283,8 @@ behind seams:
   Terminus (OFL; licence in `src/fonts/OFL-TermMono.txt`).
 - On the M9, typing on an agent's screens starts a prompt with that letter,
   Enter sends it, Del deletes and holding Del cancels; Home opens the list.
+  In the conversation, Up and Down scroll two lines; a quick double tap
+  scrolls a page (the keyboard reports taps only, never holds).
 
 Environments: `xteink_x4`, `thinknode_m9`, and `x4_compact_preview`, which
 draws the M9 layout in black and white in the top-left 320×240 of an X4 in
