@@ -72,7 +72,12 @@ void Transcript::clear() {
 void Transcript::flatten(JsonObjectConst entry, std::vector<Item>& out) const {
   int line = entry["line"] | 0;
   JsonObjectConst msg = entry["raw"]["message"];
-  const char* role = msg["role"] | (entry["raw"]["type"] | "");
+  const char* type = entry["raw"]["type"] | "";
+  // Claude Code logs each API request as an "api-request-blob" (system prompt,
+  // <total_tokens> reminders, ...); those aren't turns of the conversation.
+  if (!strcmp(type, "api-request-blob")) return;
+  if (!strcmp(msg["role"] | "", "system")) return;
+  const char* role = msg["role"] | type;
   Role r = strcmp(role, "assistant") == 0 ? Role::Assistant : Role::User;
 
   JsonVariantConst content = msg["content"];
