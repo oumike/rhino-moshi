@@ -13,6 +13,9 @@
 #include "board.h"
 #include "config_server.h"
 #include "fonts/FreeSans7pt7b.h"
+#if HAS_TRANSCRIPT
+#include "fonts/TermMono14.h"
+#endif
 #include "panel.h"
 #include "settings.h"
 
@@ -753,6 +756,11 @@ String infoText(Gateway& gw, const Agent& a) {
 }
 
 #if HAS_TRANSCRIPT
+// The conversation and its compose row read like a terminal: a bitmap
+// monospace font, tightly leaded.
+const GFXfont* F_MONO = &TermMono14;
+const int MONO_LINE_H = 16;
+
 uint16_t roleColor(Transcript::Role r) {
   switch (r) {
     case Transcript::Role::User: return color::WORKING;      // blue: what you asked
@@ -772,10 +780,10 @@ struct ConvLine {
 void buildConvLines(const Transcript& t, int maxW, std::vector<ConvLine>& out) {
   for (const Transcript::Item& it : t.items()) {
     bool tool = it.role == Transcript::Role::Tool;
-    display.setFont(F_TEXT);
+    display.setFont(F_MONO);
     String txt = ascii(tool ? "- " + it.text : it.text, true);
-    for (const String& line : layout(txt, maxW, 2000)) out.push_back({line, roleColor(it.role), F_TEXT});
-    out.push_back({String(), 0, F_TEXT});  // spacer
+    for (const String& line : layout(txt, maxW, 2000)) out.push_back({line, roleColor(it.role), F_MONO});
+    out.push_back({String(), 0, F_MONO});  // spacer
   }
   if (!out.empty()) out.pop_back();
 }
@@ -793,7 +801,7 @@ void drawDetail(Gateway& gw, Agents& agents) {
   int convTop = top + S(26);
   int composeH = S(42);
   int convBottom = H() - composeH;
-  int lineH = S(26);
+  int lineH = MONO_LINE_H;
   trRows = max(1, (convBottom - convTop) / lineH);
 
   const Transcript& t = gw.transcript();
@@ -805,7 +813,7 @@ void drawDetail(Gateway& gw, Agents& agents) {
   trScroll = constrain(trScroll, 0, trMaxScroll);
 
   if (lines.empty()) {
-    text(MARGIN, convTop + S(20), t.received() ? "No conversation yet." : "Loading conversation...", F_TEXT,
+    text(MARGIN, convTop + lineH, t.received() ? "No conversation yet." : "Loading conversation...", F_MONO,
          color::MUTED);
   } else {
     int y = convTop + lineH;
@@ -819,15 +827,15 @@ void drawDetail(Gateway& gw, Agents& agents) {
   if (trScroll < trMaxScroll) text(W() - MARGIN - S(8), convBottom - S(6), "v", F_SMALL, color::MUTED);
 
   display.fillRect(0, convBottom, W(), S(2), color::RULE);
-  display.setFont(F_TEXT);
-  int composeY = convBottom + S(28);
+  display.setFont(F_MONO);
+  int composeY = convBottom + S(26);
   if (draft.length()) {
     String shown = draft;
     int w = W() - 2 * MARGIN - textWidth("> ");
-    while (shown.length() && textWidth(shown + "|") > w) shown.remove(0, 1);
-    text(MARGIN, composeY, "> " + shown + "|", F_TEXT);
+    while (shown.length() && textWidth(shown + "_") > w) shown.remove(0, 1);
+    text(MARGIN, composeY, "> " + shown + "_", F_MONO);
   } else {
-    text(MARGIN, composeY, "Type to send a prompt", F_TEXT, color::MUTED);
+    text(MARGIN, composeY, "> Type to send a prompt", F_MONO, color::MUTED);
   }
 }
 #else

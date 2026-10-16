@@ -278,7 +278,9 @@ behind seams:
   `SEL_BG`, `BLOCKED`, …), all black or white on e-paper.
 - `ui.cpp` passes every measurement through `S()`, the identity on the X4 and
   two thirds on the compact 320×240 layout, which also uses smaller fonts
-  (including a generated FreeSans 7pt) and a few compact-only screens.
+  (including a generated FreeSans 7pt) and a few compact-only screens. The
+  conversation view uses TermMono 14, an 8×14 bitmap font converted from
+  Terminus (OFL; licence in `src/fonts/OFL-TermMono.txt`).
 - On the M9, typing on an agent's screens starts a prompt with that letter,
   Enter sends it, Del deletes and holding Del cancels; Home opens the list.
 
