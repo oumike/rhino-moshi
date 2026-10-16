@@ -186,10 +186,11 @@ uint8_t Buttons::readState() {
   uint8_t state = 0;
 
   int8_t b1 = decodeLadder(readAdc16(PIN_BUTTON_ADC_1), BUTTON_ADC_1_RANGES, BUTTON_ADC_1_COUNT);
+  if (upsideDown_ && (b1 == BTN_LEFT || b1 == BTN_RIGHT)) b1 = BTN_LEFT + BTN_RIGHT - b1;
   if (b1 >= 0) state |= (1 << b1);
 
   int8_t b2 = decodeLadder(readAdc16(PIN_BUTTON_ADC_2), BUTTON_ADC_2_RANGES, BUTTON_ADC_2_COUNT);
-  if (b2 >= 0 && swapUpDown_) b2 = 1 - b2;
+  if (b2 >= 0 && upsideDown_) b2 = 1 - b2;
   if (b2 >= 0) state |= (1 << (b2 + 4));  // ladder 2 starts at BTN_UP
 
   if (digitalRead(PIN_BUTTON_POWER) == LOW) state |= (1 << BTN_POWER);

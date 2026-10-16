@@ -33,21 +33,6 @@ void saveWifi(const WifiConfig& wifi) {
   p.end();
 }
 
-uint8_t rotation() {
-  Preferences p;
-  p.begin(NS, true);
-  uint8_t r = p.getUChar("rotation", DEFAULT_ROTATION);
-  p.end();
-  return r & 0x03;
-}
-
-void saveRotation(uint8_t rotation) {
-  Preferences p;
-  p.begin(NS, false);
-  p.putUChar("rotation", rotation & 0x03);
-  p.end();
-}
-
 uint16_t screenTimeout() {
   Preferences p;
   p.begin(NS, true);

@@ -79,7 +79,6 @@ void handleRoot() {
   WifiConfig wifi = settings::loadWifi();
   std::vector<HostConfig> hosts = settings::hosts();
   int active = settings::activeHost();
-  uint8_t rot = settings::rotation();
   bool hasPw = settings::webPassword().length() > 0;
 
   String b;
@@ -139,14 +138,10 @@ void handleRoot() {
   b += esc(keyLine);
   b += F("</textarea>");
 
-  b += F("<h2>Display</h2><label>Orientation</label><select name=rotation>");
-  b += String("<option value=3") + (rot != 1 ? " selected" : "") + ">Portrait</option>";
-  b += String("<option value=1") + (rot == 1 ? " selected" : "") + ">Portrait, upside down</option>";
-  b += F("</select>");
 #if HAS_BACKLIGHT
   {
     uint16_t cur = settings::screenTimeout();
-    b += F("<label>Screen off after</label><select name=screen_off>");
+    b += F("<h2>Display</h2><label>Screen off after</label><select name=screen_off>");
     bool found = false;
     for (uint16_t s : settings::SCREEN_TIMEOUTS) {
       found |= s == cur;
@@ -293,7 +288,6 @@ void handleSave() {
   settings::saveHosts(hosts);
   settings::saveActiveHost(active);
 
-  settings::saveRotation(server.arg("rotation").toInt() == 1 ? 1 : 3);
   if (server.hasArg("prompts")) settings::savePrompts(server.arg("prompts"));
   if (server.hasArg("screen_off")) settings::saveScreenTimeout(constrain(server.arg("screen_off").toInt(), 0, 3600));
 

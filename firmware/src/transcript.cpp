@@ -97,6 +97,10 @@ void Transcript::flatten(JsonObjectConst entry, std::vector<Item>& out) const {
     // tool_result blocks are dropped: they're the terminal output, not the turn.
   }
   text.trim();
+  if (STRING_CAP && text.length() > 2 * STRING_CAP) {  // several capped text blocks
+    text.remove(2 * STRING_CAP);
+    text += "...";
+  }
   if (text.length()) out.push_back({r, line, text});
   for (const Item& it : tools) out.push_back(it);
 }

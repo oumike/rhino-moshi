@@ -63,9 +63,9 @@ class Buttons {
   // A character as if typed on a keyboard.
   void injectChar(char c);
 
-  // Upside down, the side keys trade places: report each as the other so Up
-  // stays the upper one.
-  void setSwapUpDown(bool swap) { swapUpDown_ = swap; }
+  // Upside down, each pair of keys trades places: report each as the other so
+  // Up stays the upper side key and Left the leftmost of Left/Right.
+  void setUpsideDown(bool flip) { upsideDown_ = flip; }
 
   static const char* name(uint8_t button);
 
@@ -89,7 +89,7 @@ class Buttons {
   uint16_t last_ = 0;
   unsigned long changedAt_ = 0, pressStartedAt_ = 0;
   bool holdSent_ = false;
-  volatile bool swapUpDown_ = false;
+  volatile bool upsideDown_ = false;
   volatile uint16_t injectMask_ = 0;
   volatile unsigned long injectUntil_ = 0, injectFreeAt_ = 0;
 

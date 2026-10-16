@@ -41,7 +41,7 @@ static void heap(const char* step) {
 }
 
 static void show(const String& text) {
-  display.setRotation(settings::rotation());
+  display.setRotation(PANEL_ROTATION);
   display.setFullWindow();
   display.firstPage();
   do {

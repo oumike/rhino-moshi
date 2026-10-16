@@ -37,21 +37,20 @@ opens a tunnel (an SSH `direct-tcpip` channel, the same thing `ssh -W` does) to
    append it to `~/.ssh/authorized_keys` on each host:
 
    ```
-   restrict,port-forwarding,permitopen="127.0.0.1:24543",command="false" ssh-ed25519 AAAA… rhino-moshi-x4-3fa2
+   restrict,port-forwarding,permitopen="127.0.0.1:24543",command="/usr/bin/top -l 1 -n 0 -s 0" ssh-ed25519 AAAA… rhino-moshi-x4-3fa2
    ```
 
-   The options limit this key to exactly one thing: a tunnel to the moshi-hook
-   gateway. `restrict` turns off every OpenSSH feature (pty, agent/X11
-   forwarding, other forwards). `port-forwarding` plus `permitopen` re-enable
-   only the gateway tunnel, and `command="false"` makes any attempt to run a
-   shell or command exit immediately. Requires OpenSSH 7.2+. A stolen X4 can do what the X4 already
-   does, and nothing more. To revoke it, delete the line.
+   The options limit this key to two things: a tunnel to the moshi-hook
+   gateway, and one read-only `top`. `restrict` turns off every OpenSSH
+   feature (pty, agent/X11 forwarding, other forwards). `port-forwarding` plus
+   `permitopen` re-enable only the gateway tunnel, and the forced `command`
+   means that whatever the device asks to run, the host runs that `top`, which
+   the Home dashboard reads for the host's CPU, load and memory (macOS hosts).
+   Requires OpenSSH 7.2+. A stolen device can do what it already does, and
+   nothing more. To revoke it, delete the line.
 
-   The M9's line forces `command="/usr/bin/top -l 1 -n 0 -s 0"` instead of
-   `"false"`: whatever it asks to run, the host runs that one read-only `top`,
-   which the Home dashboard reads for the host's CPU, load and memory (macOS
-   hosts). An M9 paired before this still works, but its dashboard asks for
-   the line to be pasted again.
+   Devices paired with older firmware have `command="false"` there. They still
+   connect, but the dashboard asks for the line to be pasted again.
 3. **Add the host on the X4:** a name, address, SSH port and user, entered on
    the settings page. Up to four hosts can be set up; Menu → Hosts on the X4
    switches between them.
@@ -68,7 +67,7 @@ opens a tunnel (an SSH `direct-tcpip` channel, the same thing `ssh -W` does) to
 | Someone on the LAN talks to moshi-hook | The gateway never leaves loopback. Only SSH is exposed, and SSH already guards the machine. |
 | Network eavesdropping or tampering | All traffic runs inside SSH (encrypted and integrity-checked). |
 | Spoofed host / man-in-the-middle | The host key is pinned on first use, and any change blocks the connection. |
-| Lost or stolen X4 | The key is restricted to `permitopen="127.0.0.1:24543"` (and, on the M9, to running a fixed `top`). Remove its `authorized_keys` line on each host. |
+| Lost or stolen X4 | The key is restricted to `permitopen="127.0.0.1:24543"` and to running a fixed `top`. Remove its `authorized_keys` line on each host. |
 | Someone reads the key off the X4 | The private key lives in NVS. Enabling ESP32 flash encryption is optional hardening; without it, physical access is game over, and the restriction above bounds the damage. |
 | Settings page abuse | The page is open on the LAN by default; set a page password on it to require HTTP Basic auth. The open setup access point runs only on a fresh install or with Back held at boot (physical access). The page shows the public key and accepts settings; the private key can't be read or exported. |
 
@@ -164,7 +163,7 @@ from `main`. It adds:
   It handles Wi-Fi credentials, shows the `authorized_keys` line, takes up to
   four host entries (name, address, port, user) and which one to connect to,
   shows and forgets each host's pinned key,
-  sets orientation (portrait by default), edits the canned prompts (one per
+  edits the canned prompts (one per
   line, up to 20 of 300 characters), and sets an optional page password
   (HTTP Basic auth, user `admin`; none by default).
 - **Setup mode:** with no saved Wi-Fi (fresh install), or with Back held at
@@ -181,27 +180,37 @@ from `main`. It adds:
 ### Screens
 
 ```
- Agents (home)                 Card                          Agent detail
+ Agents                        Card                          Agent (conversation)
 ┌────────────────────────┐   ┌────────────────────────┐   ┌────────────────────────┐
-│ laptop   5h 42% online │   │ laptop    1 of 3 ⧗ 5m  │   │ app-moshi / 1   claude │
-│────────────────────────│   │────────────────────────│   │ Fix login redirect     │
-│▶! app-moshi  claude 5m │   │ app-moshi · claude     │   │ opus · 42% context left│
-│   Fix login redirect   │   │ Bash                   │   │────────────────────────│
-│ ~ api        codex  45s│   │                        │   │ > Running tests…       │
-│   Running tests…       │   │ touch /tmp/probe       │   │                        │
-│ ✓•docs       claude 2h │   │                        │   │                        │
-│ · scratch    shell     │   │                        │   │                        │
+│Prev │Next │ Open │Home │   │Deny │Next │Approve│Back│   │     │Prompt│Answer│Back│
 ├────────────────────────┤   ├────────────────────────┤   ├────────────────────────┤
-│ Menu │ Open │     │     │   │ Back │ Deny │Approve│  │   │ Back │Answer│Keys│Prompt│
+│ laptop   5h 42% online │   │ laptop    1 of 3 ⧗ 5m  │   │ laptop   5h 42% online │
+│────────────────────────│   │────────────────────────│   │────────────────────────│
+│▶! app-moshi  claude 5m │   │ app-moshi · claude     │   │ app-moshi - claude     │
+│   Fix login redirect   │   │ Bash                   │   │ working 2m  opus - 42% │
+│ ~ api        codex  45s│   │                        │   │ > Running tests…       │
+│   Running tests…       │   │ touch /tmp/probe       │   │────────────────────────│
+│ ✓•docs       claude 2h │   │                        │   │ Fix the login redirect │
+│ · scratch    shell     │   │                        │   │ - Read auth.ts         │
 └────────────────────────┘   └────────────────────────┘   └────────────────────────┘
 ```
+
+The X4 is held with its key row above the screen and the page-turn keys on the
+left edge; the screen is drawn that way up only. Each key's label sits in a
+band along the top edge, under the key: left to right, Left, Right, Confirm,
+Back. Up is the upper side key.
 
 - **Agents:** sorted attention-first (blocked, then done, then by
   `statusChangedAt`). An agent that finishes is re-sorted and marked unseen
   (`•`) until you open it. There's no pop-up. The header shows the host, its
-  most-used rate-limit window and the connection state. Back opens the Menu
-  (also from the connection status screen, so you can switch away from an
-  unreachable host).
+  most-used rate-limit window and the connection state. Back goes Home. On
+  the connection status screen Back opens the Menu, so you can switch away
+  from an unreachable host.
+- **Home:** where the X4 boots. moshi-hook's version and whether an update is
+  out, the host's CPU, load and memory (read every 15 s while shown), each
+  account's limits, agent counts, workspaces, dev servers, simulators, and the
+  X4's own Wi-Fi, battery and uptime; see [ThinkNode M9](#thinknode-m9) for
+  the sources. Confirm opens the agents, Back the Menu.
 - **Card:** takes over from the agents list or detail when the watched agent
   has a pending request, unless dismissed. Back dismisses it until the agent
   blocks again (Confirm on the agent reopens it). Right jumps to the next
@@ -213,9 +222,14 @@ from `main`. It adds:
   | Approval | Approve | Deny | Scroll |
   | Plan | Send option | Page the plan | Select option |
   | Question | Choose (Send on the last) | Previous question | Select option |
-- **Agent detail:** status, title, model and context left, and the live
-  activity line (redrawn at most every 10 s). Answer reopens a pending card,
-  Keys and Prompt open the screens below (only for agents with a session).
+- **Agent:** status, model and context left and the live activity line
+  (redrawn at most every 10 s), over the agent's conversation in TermMono 20:
+  prompts, replies and one line per tool call, read-only. It follows the
+  newest message; Up and Down page through it, and Up at the top loads older
+  messages. Without PSRAM it keeps the last 60 messages and cuts each string
+  in a transcript frame at 600 bytes. New messages redraw it at most every
+  3 s. Answer reopens a pending card and Prompt opens the canned prompts
+  (only for agents with a session).
 - **Keys:** Esc, Ctrl-C, Enter, Shift-Tab, Tab, Up and Down. Confirm sends the
   selected key and stays on the screen, so Shift-Tab can be pressed again to
   cycle Claude's mode. The gateway doesn't report the mode, so the X4 can't
@@ -227,7 +241,7 @@ from `main`. It adds:
   symbols layer, space and Send. Up/Down change rows, Left/Right move along a
   row (both wrap), Confirm types, Back deletes, and holding Back cancels.
   Meant for short prompts.
-- **Menu:** Usage, Hosts, Device, Flip screen and Restart. Cards don't take
+- **Menu:** Usage, Hosts, Device and Restart. Cards don't take
   over the Menu and its screens.
 - **Usage:** each account moshi-hook reports (agent, masked account label,
   when it was captured), with every window's use as a bar and its reset time.
@@ -238,8 +252,6 @@ from `main`. It adds:
   fingerprint for Trust.
 - **Device:** settings page address, Wi-Fi network and signal, the X4's key
   fingerprint, battery voltage, free memory, uptime and build date.
-- **Flip screen** turns the display upside down (saved; also on the settings
-  page). Up/Down swap with it, so Up stays the upper key.
 - Not on the device: regenerating the key (every host would have to
   re-authorize) and changing Wi-Fi, which is setup mode (Back held at boot).
 
@@ -286,8 +298,9 @@ behind seams:
 - `ui.cpp` passes every measurement through `S()`, the identity on the X4 and
   two thirds on the compact 320×240 layout, which also uses smaller fonts
   (including a generated FreeSans 7pt) and a few compact-only screens. The
-  conversation view uses TermMono 14, an 8×14 bitmap font converted from
-  Terminus (OFL; licence in `src/fonts/OFL-TermMono.txt`).
+  conversation view and Home use TermMono 14, an 8×14 bitmap font converted
+  from Terminus (OFL; licence in `src/fonts/OFL-TermMono.txt`); the X4 uses
+  TermMono 20, a bold 10×20 cut of it.
 - On the M9, typing on an agent's screens starts a prompt with that letter,
   Enter sends it, Del deletes and holding Del cancels.
 - The M9 boots to a dashboard, which Home returns to: moshi-hook's version,
@@ -349,6 +362,6 @@ keyboard's register and key codes (the firmware logs raw codes as `[kb]`).
 - **Multiple machines:** each runs its own moshi-hook. The device connects to
   one at a time and switches between them.
 - **Finished agents:** re-sorted and marked as unseen, with no pop-up.
-- **Rotation:** on the settings page or Menu → Flip screen. **Button calibration:** none on the
+- **Rotation:** fixed per board (`PANEL_ROTATION`). **Button calibration:** none on the
   device; the ladder thresholds in `board.h` are measured on hardware.
   `docs/flashing.md` must drop the old `rhino-moshi` CLI commands.

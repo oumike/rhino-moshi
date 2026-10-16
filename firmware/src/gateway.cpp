@@ -17,10 +17,12 @@ const unsigned long DEAD_AFTER_MS = 75000;
 const int MAX_MESSAGES_PER_POLL = 4;
 // Physical source rows per transcript page. Kept small so a page stays within
 // the transcript socket's buffer; several rows fold into one shown message.
-const int TRANSCRIPT_LIMIT = 24;
+// Smaller without PSRAM, where the whole parsed page sits in internal RAM.
+const int TRANSCRIPT_LIMIT = BOARD_HAS_PSRAM ? 24 : 12;
 
 #if HAS_HOST_STATS
-const unsigned long STATS_EVERY_MS = 5000;
+// Each reading redraws Home; an e-paper refresh is slower and shows more.
+const unsigned long STATS_EVERY_MS = DISPLAY_EPAPER ? 15000 : 5000;
 #endif
 const unsigned long UPDATE_CHECK_EVERY_MS = 6UL * 3600 * 1000;
 
@@ -379,7 +381,7 @@ void Gateway::pollTranscript() {
     }
   }
 
-  static PsRamAllocator alloc;
+  static TranscriptAllocator alloc;
   static JsonDocument filter;
   if (filter.isNull()) Transcript::buildFilter(filter);
 
@@ -395,7 +397,8 @@ void Gateway::pollTranscript() {
     // the filter skips everything but the conversation as it goes by. Claude's
     // request snapshots nest well past ArduinoJson's default depth of 10.
     JsonDocument doc(&alloc);
-    DeserializationError err = deserializeJson(doc, tws_, DeserializationOption::Filter(filter),
+    CappedJsonReader<WsClient> in(tws_, Transcript::STRING_CAP);
+    DeserializationError err = deserializeJson(doc, in, DeserializationOption::Filter(filter),
                                                DeserializationOption::NestingLimit(64));
     tws_.endMessage();
     Guard g(*this);
@@ -432,7 +435,7 @@ void Gateway::watchTranscript(const Agent* a) {
 }
 
 void Gateway::requestOlderTranscript() {
-  if (!transcript_.hasMore() || trOlderPending_) return;
+  if (!transcript_.canLoadOlder() || trOlderPending_) return;
   trOlderReq_ = true;
 }
 

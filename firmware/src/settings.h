@@ -27,10 +27,6 @@ namespace settings {
 WifiConfig loadWifi();
 void saveWifi(const WifiConfig& wifi);
 
-// Display rotation (0-3); 1 and 3 are the two portrait orientations.
-uint8_t rotation();
-void saveRotation(uint8_t rotation);
-
 // Seconds without a key press before the backlight turns off; 0 is never.
 const uint16_t DEFAULT_SCREEN_TIMEOUT = 30;
 uint16_t screenTimeout();

@@ -16,6 +16,10 @@
 // Panel class: e-paper, so the UI batches redraws and mixes partial and full
 // refreshes. Black and white only.
 #define DISPLAY_EPAPER 1
+// The conversation view and the host dashboard, read-only: no keyboard to
+// compose with. There's no PSRAM, so the transcript is kept short (see
+// transcript.h).
+#define HAS_TRANSCRIPT 1
 
 // ---------------------------------------------------------------------------
 // E-paper panel (SPI, custom pins -- not the ESP32-C3 hardware SPI defaults)
@@ -71,22 +75,17 @@ static const uint8_t BUTTON_ADC_2_COUNT = 2;
 // ---------------------------------------------------------------------------
 // Physical key positions
 //
-// On-screen labels are anchored to wherever the real key is, so the label
-// points at the button rather than merely naming it. Two clusters, matching
-// the two ADC ladders:
+// The X4 is held with its key row ABOVE the screen and the page-turn keys on
+// the LEFT edge (see PANEL_ROTATION). Turned that way, the keys' wiring runs
+// backwards, so Buttons swaps Up/Down and Left/Right: Up is still the upper
+// side key, and Left the leftmost of the pair. The key row then reads, left to
+// right, Left, Right, Confirm, Back.
 //
-//   - Up/Down are the page-turn keys on the RIGHT EDGE.
-//   - Back/Confirm/Left/Right are the row BELOW THE SCREEN, left to right.
-//
-// If the labels come out over the wrong keys, reorder BOTTOM_ROW_ORDER -- that
-// is the only thing that needs to change.
+// On-screen labels are drawn in a band along the top edge, each over its key.
+// If they come out over the wrong keys, reorder KEY_ROW_ORDER -- that is the
+// only thing that needs to change.
 // ---------------------------------------------------------------------------
-static const uint8_t BOTTOM_ROW_ORDER[4] = {BTN_BACK, BTN_CONFIRM, BTN_LEFT,
-                                            BTN_RIGHT};
-
-// Where the right-edge keys sit vertically, as a fraction of screen height.
-static const float SIDE_KEY_UP_FRAC = 0.38f;
-static const float SIDE_KEY_DOWN_FRAC = 0.62f;
+static const uint8_t KEY_ROW_ORDER[4] = {BTN_LEFT, BTN_RIGHT, BTN_CONFIRM, BTN_BACK};
 
 // ---------------------------------------------------------------------------
 // Power
@@ -99,15 +98,11 @@ static const float BATTERY_DIVIDER = 2.0f;
 // ---------------------------------------------------------------------------
 // Panel geometry
 //
-// The driver's native orientation is landscape (800x480). The X4 is a portrait
-// device, so rotation 1 or 3 is what you actually want -- which of the two
-// depends on which way up you hold it. Rotation is stored in NVS and settable
-// at runtime via POST /config, so you can flip it without reflashing.
-//
-// 3 is the one that comes out right way up on hardware, with the page-turn keys
-// on the right edge as the button layout above assumes. 1 is the same axis
-// inverted, i.e. upside down.
+// The driver's native orientation is landscape (800x480); the X4 is used
+// portrait. Rotation 1 puts the key row above the screen and the page-turn
+// keys on the left edge, as the key layout above assumes; it is the only one
+// used. (3 is the same axis turned 180 degrees.)
 // ---------------------------------------------------------------------------
 #define PANEL_NATIVE_WIDTH  800
 #define PANEL_NATIVE_HEIGHT 480
-#define DEFAULT_ROTATION    3
+#define PANEL_ROTATION      1

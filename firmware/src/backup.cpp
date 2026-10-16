@@ -73,7 +73,6 @@ String toJson() {
   }
   doc["activeHost"] = active;
 
-  doc["display"]["rotation"] = settings::rotation();
   doc["display"]["screenTimeout"] = settings::screenTimeout();
   doc["web"]["password"] = settings::webPassword();
   doc["deviceKey"] = settings::deviceKey();
@@ -103,11 +102,8 @@ bool restore(const String& json, String& error) {
     error = "Backup is from a newer firmware.";
     return false;
   }
-  JsonVariantConst rot = doc["display"]["rotation"];
-  if (!rot.isNull() && rot != 1 && rot != 3) {
-    error = "Backup has an invalid orientation.";
-    return false;
-  }
+  // Older backups also hold a display rotation; the orientation is fixed now,
+  // so it is ignored.
   bool portsOk = validPort(doc["host"]["port"]);
   for (JsonVariantConst h : doc["hosts"].as<JsonArrayConst>()) portsOk &= validPort(h["port"]);
   if (!portsOk) {
@@ -133,7 +129,6 @@ bool restore(const String& json, String& error) {
     settings::saveActiveHost(0);
   }
 
-  if (!rot.isNull()) settings::saveRotation(rot.as<uint8_t>());
   if (doc["display"]["screenTimeout"].is<uint16_t>()) settings::saveScreenTimeout(doc["display"]["screenTimeout"]);
   if (doc["web"]["password"].is<const char*>()) settings::saveWebPassword(doc["web"]["password"].as<String>());
 

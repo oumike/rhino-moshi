@@ -14,7 +14,11 @@
 #include "config_server.h"
 #include "fonts/FreeSans7pt7b.h"
 #if HAS_TRANSCRIPT
+#if LAYOUT_COMPACT
 #include "fonts/TermMono14.h"
+#else
+#include "fonts/TermMono20.h"
+#endif
 #endif
 #include "panel.h"
 #include "settings.h"
@@ -33,6 +37,7 @@ const GFXfont* F_TITLE = &FreeSansBold12pt7b;
 const GFXfont* F_BOLD = &FreeSansBold9pt7b;
 const GFXfont* F_TEXT = &FreeSans9pt7b;
 const GFXfont* F_SMALL = &FreeSans7pt7b;
+const int HEADER_TOP = 0;
 const int HEADER_H = 32;
 const int FOOTER_H = 0;  // M9 has physical keys; no on-screen hint row
 const int ROW_H = 46;
@@ -47,8 +52,12 @@ const GFXfont* F_TITLE = &FreeSansBold18pt7b;
 const GFXfont* F_BOLD = &FreeSansBold12pt7b;
 const GFXfont* F_TEXT = &FreeSans12pt7b;
 const GFXfont* F_SMALL = &FreeSans9pt7b;
-const int HEADER_H = 54;
-const int FOOTER_H = 58;
+// The X4's key row is above the screen, so the key labels are a band along
+// the top edge, with the header under it; nothing is drawn below the content.
+const int KEY_ROW_H = 58;
+const int HEADER_TOP = KEY_ROW_H;
+const int HEADER_H = KEY_ROW_H + 54;
+const int FOOTER_H = 0;
 const int ROW_H = 76;
 const int OPTION_H = 44;
 const int OPTION_DESC_H = 66;
@@ -79,13 +88,14 @@ enum class Screen { List, Detail, Card, Keys, Prompts, Keyboard, Menu, Usage, Ho
 // Screens about one agent; the rest work without any.
 bool agentScreen(Screen s) { return s != Screen::List && s < Screen::Menu; }
 
-uint8_t rotation = DEFAULT_ROTATION;
+uint8_t rotation = PANEL_ROTATION;
 int partials = 0;
 View lastView = View::None;
 String lastMessage;
 
-// Keyboard builds (M9) have a Home key and boot to a dashboard of every
-// session; the X4 boots to the agent list.
+// Boards with the conversation view boot to a dashboard of the host and every
+// session; the M9 has a Home key for it, and on the X4 Back from the agent
+// list goes there.
 #define HAS_DASHBOARD HAS_TRANSCRIPT
 #if HAS_DASHBOARD
 const Screen HOME = Screen::Home;
@@ -166,16 +176,17 @@ int trLastDir = 0;
 unsigned long trLastDirAt = 0;
 int trMaxScroll = 0, trRows = 0;
 bool trHasMore = false;
+bool trPending = false;  // the transcript changed and isn't drawn yet
+const unsigned long TRANSCRIPT_REDRAW_MS = 3000;
 
 // The menu and its screens.
-enum { M_USAGE, M_HOSTS, M_DEVICE, M_FLIP, M_SCREEN, M_RESTART, M_COUNT };
-const char* const MENU_ITEMS[M_COUNT] = {"Usage", "Hosts", "Device", "Flip screen", "Screen off", "Restart"};
-// The M9's panel has one good orientation, so it drops Flip; every other item
-// is in order. The X4 keeps all of them.
-#if defined(BOARD_M9)
+enum { M_USAGE, M_HOSTS, M_DEVICE, M_SCREEN, M_RESTART, M_COUNT };
+const char* const MENU_ITEMS[M_COUNT] = {"Usage", "Hosts", "Device", "Screen off", "Restart"};
+// Screen off is for a backlight; e-paper keeps its picture for free.
+#if HAS_BACKLIGHT
 const int MENU_ORDER[] = {M_USAGE, M_HOSTS, M_DEVICE, M_SCREEN, M_RESTART};
 #else
-const int MENU_ORDER[] = {M_USAGE, M_HOSTS, M_DEVICE, M_FLIP, M_RESTART};
+const int MENU_ORDER[] = {M_USAGE, M_HOSTS, M_DEVICE, M_RESTART};
 #endif
 const int MENU_LEN = sizeof(MENU_ORDER) / sizeof(MENU_ORDER[0]);
 int mainSel = 0;
@@ -467,15 +478,15 @@ void header(Gateway& gw, Agents& agents) {
   const GFXfont* rf = LAYOUT_COMPACT ? F_SMALL : F_TEXT;
   display.setFont(rf);
   int rw = textWidth(right);
-  text(W() - MARGIN - rw, S(36), right, rf, rc);
+  text(W() - MARGIN - rw, HEADER_TOP + S(36), right, rf, rc);
   String use = usageSummary(gw.usage());
   if (use.length()) {
     display.setFont(F_SMALL);
     rw += textWidth(use) + S(16);
-    text(W() - MARGIN - rw, S(35), use, F_SMALL, color::MUTED);
+    text(W() - MARGIN - rw, HEADER_TOP + S(35), use, F_SMALL, color::MUTED);
   }
   display.setFont(F_BOLD);
-  text(MARGIN, S(36), fit(ascii(gw.host().name), W() - 3 * MARGIN - rw), F_BOLD);
+  text(MARGIN, HEADER_TOP + S(36), fit(ascii(gw.host().name), W() - 3 * MARGIN - rw), F_BOLD);
   display.fillRect(0, HEADER_H - S(3), W(), S(3), color::RULE);
 }
 
@@ -498,23 +509,23 @@ void drawNotice() {
 // The M9 has a full physical keyboard, so no on-screen key hints are drawn.
 void footer(const char*, const char*, const char*, const char*) {}
 #else
-// Labels for the row of keys under the screen, each drawn above its key.
+// Labels for the X4's row of keys, in the band along the top edge, each drawn
+// under its key.
 void footer(const char* back, const char* confirm, const char* left, const char* right) {
   const char* labels[BTN_COUNT] = {};
   labels[BTN_BACK] = back;
   labels[BTN_CONFIRM] = confirm;
   labels[BTN_LEFT] = left;
   labels[BTN_RIGHT] = right;
-  int top = H() - FOOTER_H;
   int slot = W() / 4;
-  display.fillRect(0, top, W(), 2, color::RULE);
+  display.fillRect(0, KEY_ROW_H - 2, W(), 2, color::RULE);
   display.setFont(F_BOLD);
   for (int i = 0; i < 4; i++) {
-    const char* label = labels[BOTTOM_ROW_ORDER[i]];
-    if (i) display.drawFastVLine(i * slot, top + 10, FOOTER_H - 20, color::RULE);
+    const char* label = labels[KEY_ROW_ORDER[i]];
+    if (i) display.drawFastVLine(i * slot, 10, KEY_ROW_H - 20, color::RULE);
     if (!label || !*label) continue;
     String s = fit(label, slot - 8);
-    text(i * slot + (slot - textWidth(s)) / 2, top + 37, s, F_BOLD);
+    text(i * slot + (slot - textWidth(s)) / 2, 37, s, F_BOLD);
   }
 }
 #endif
@@ -562,7 +573,8 @@ void drawList(Gateway& gw, Agents& agents) {
   }
 
   String pageInfo = pages > 1 ? String(page + 1) + "/" + String(pages) : String();
-  footer("Menu", agents.size() ? "Open" : "", pages > 1 ? "Prev" : "", pages > 1 ? "Next" : "");
+  footer(HAS_DASHBOARD && !HAS_KEYBOARD ? "Home" : "Menu", agents.size() ? "Open" : "", pages > 1 ? "Prev" : "",
+         pages > 1 ? "Next" : "");
   if (pageInfo.length()) {
     display.setFont(F_SMALL);
     text(W() - MARGIN - textWidth(pageInfo), H() - FOOTER_H - S(8), pageInfo, F_SMALL, color::MUTED);
@@ -783,9 +795,15 @@ String infoText(Gateway& gw, const Agent& a) {
 
 #if HAS_TRANSCRIPT
 // The conversation and its compose row read like a terminal: a bitmap
-// monospace font, tightly leaded.
+// monospace font, tightly leaded. The X4's panel is sharper, so its font is
+// bigger and bold (e-paper shows thin strokes faintly).
+#if LAYOUT_COMPACT
 const GFXfont* F_MONO = &TermMono14;
-const int MONO_LINE_H = 16;
+const int MONO_LINE_H = 16, MONO_CW = 8, MONO_BASE = 12;  // line, cell width, baseline in the line
+#else
+const GFXfont* F_MONO = &TermMono20;
+const int MONO_LINE_H = 22, MONO_CW = 10, MONO_BASE = 17;
+#endif
 
 uint16_t roleColor(Transcript::Role r) {
   switch (r) {
@@ -814,7 +832,8 @@ void buildConvLines(const Transcript& t, int maxW, std::vector<ConvLine>& out) {
   if (!out.empty()) out.pop_back();
 }
 
-// M9: the agent page is its scrollable conversation with an inline compose row.
+// The agent page is its scrollable conversation: on the M9 with an inline
+// compose row; on the X4 read-only, under the agent's status.
 void drawDetail(Gateway& gw, Agents& agents) {
   header(gw, agents);
   int i = agents.indexOf(selectedId);
@@ -822,16 +841,38 @@ void drawDetail(Gateway& gw, Agents& agents) {
   const Agent& a = agents[i];
 
   int top = HEADER_H;
+  String title = fit(ascii(a.workspace) + " - " + ascii(a.kind), W() - 2 * MARGIN);
+#if HAS_KEYBOARD
   display.setFont(F_BOLD);
-  text(MARGIN, top + S(18), fit(ascii(a.workspace) + " - " + ascii(a.kind), W() - 2 * MARGIN), F_BOLD);
+  text(MARGIN, top + S(18), title, F_BOLD);
   int convTop = top + S(26);
   int composeH = S(42);
+#else
+  // Redrawn as these change; see statusDirty.
+  drawnInfo = infoText(gw, a);
+  drawnActivity = activityText(gw, a);
+  int y = top + 32;
+  display.setFont(F_BOLD);
+  text(MARGIN, y, title, F_BOLD);
+  display.setFont(F_MONO);
+  y += MONO_LINE_H + 2;
+  text(MARGIN, y, fit(stateLine(a) + (drawnInfo.length() ? "  " + drawnInfo : String()), W() - 2 * MARGIN), F_MONO,
+       stateColor(a.state));
+  if (drawnActivity.length()) {
+    y += MONO_LINE_H;
+    text(MARGIN, y, fit("> " + drawnActivity, W() - 2 * MARGIN), F_MONO, color::MUTED);
+  }
+  y += 8;
+  display.fillRect(0, y, W(), 2, color::RULE);
+  int convTop = y + 4;
+  int composeH = 0;
+#endif
   int convBottom = H() - composeH;
   int lineH = MONO_LINE_H;
   trRows = max(1, (convBottom - convTop) / lineH);
 
   const Transcript& t = gw.transcript();
-  trHasMore = t.hasMore();
+  trHasMore = t.canLoadOlder();
   std::vector<ConvLine> lines;
   buildConvLines(t, W() - 2 * MARGIN, lines);
   trMaxScroll = max(0, (int)lines.size() - trRows);
@@ -852,6 +893,7 @@ void drawDetail(Gateway& gw, Agents& agents) {
   if (trScroll > 0 || t.hasMore()) text(W() - MARGIN - S(8), convTop + S(4), "^", F_SMALL, color::MUTED);
   if (trScroll < trMaxScroll) text(W() - MARGIN - S(8), convBottom - S(6), "v", F_SMALL, color::MUTED);
 
+#if HAS_KEYBOARD
   display.fillRect(0, convBottom, W(), S(2), color::RULE);
   display.setFont(F_MONO);
   int composeY = convBottom + S(26);
@@ -863,6 +905,9 @@ void drawDetail(Gateway& gw, Agents& agents) {
   } else {
     text(MARGIN, composeY, "> Type to send a prompt", F_MONO, color::MUTED);
   }
+#else
+  footer("Back", gw.cardPending() && gw.watchedId() == a.id ? "Answer" : "", "", hasSession(a) ? "Prompt" : "");
+#endif
 }
 #else
 void drawDetail(Gateway& gw, Agents& agents) {
@@ -1095,7 +1140,6 @@ void drawMenu(Gateway& gw, Agents& agents) {
       use.length() ? "Most used: " + use : u.received() ? String("No accounts reported") : String("Nothing reported yet"),
       host,
       "Settings page, Wi-Fi, key, battery",
-      "Turn the screen upside down",
       (screenTimeoutS ? "After " + settings::screenTimeoutName(screenTimeoutS) : String("Never")) + ", Enter changes it",
       "Start the " BOARD_NAME " over",
   };
@@ -1126,24 +1170,25 @@ String span(long d) {
 // label column, then the value.
 void drawHome(Gateway& gw, Agents& agents) {
   header(gw, agents);
-  const int LH = MONO_LINE_H, CW = 8;  // TermMono cell
+  const int LH = MONO_LINE_H, CW = MONO_CW, BASE = MONO_BASE;
   const int VX = MARGIN + 8 * CW;      // values start after an 8-cell label
   const int RX = W() - MARGIN;
   int y = HEADER_H + 2;
   display.setFont(F_MONO);
 
-  auto label = [&](const String& l) { text(MARGIN, y + 12, l, F_MONO, color::MUTED); };
+  auto label = [&](const String& l) { text(MARGIN, y + BASE, l, F_MONO, color::MUTED); };
   auto value = [&](const String& v, uint16_t c = color::FG) {
-    text(VX, y + 12, fit(v, RX - VX), F_MONO, c);
+    text(VX, y + BASE, fit(v, RX - VX), F_MONO, c);
   };
   // A value drawn as a bar with text after it, e.g. "[====    ] 27% 2.05".
   auto bar = [&](int x, float frac, const String& right, uint16_t rc, bool warn) {
     int rx = RX - right.length() * CW;
-    text(rx, y + 12, right, F_MONO, rc);
+    text(rx, y + BASE, right, F_MONO, rc);
     int bw = rx - CW - x;
     if (bw < 12) return;
-    display.drawRect(x, y + 4, bw, 8, color::RULE);
-    display.fillRect(x + 2, y + 6, (int)((bw - 4) * constrain(frac, 0.0f, 1.0f)), 4, warn ? color::BLOCKED : color::BAR);
+    int bh = LH / 2, by = y + BASE - bh;  // a box as tall as half the line, sitting on the baseline
+    display.drawRect(x, by, bw, bh, color::RULE);
+    display.fillRect(x + 2, by + 2, (int)((bw - 4) * constrain(frac, 0.0f, 1.0f)), bh - 4, warn ? color::BLOCKED : color::BAR);
   };
   auto rule = [&] {
     y += 3;
@@ -1164,9 +1209,9 @@ void drawHome(Gateway& gw, Agents& agents) {
     value(v);
     if (info.updateAvailable) {
       String up = info.latest + " available";
-      text(RX - up.length() * CW, y + 12, up, F_MONO, color::BLOCKED);
+      text(RX - up.length() * CW, y + BASE, up, F_MONO, color::BLOCKED);
     } else if (info.updateChecked) {
-      text(RX - 10 * CW, y + 12, "up to date", F_MONO, color::DONE);
+      text(RX - 10 * CW, y + BASE, "up to date", F_MONO, color::DONE);
     }
   }
   y += LH;
@@ -1220,7 +1265,7 @@ void drawHome(Gateway& gw, Agents& agents) {
       String name = agentName(a.agent);
       label(name.length() > 7 ? name.substring(0, 7) : name);
       String wl = ascii(w.label);
-      text(VX, y + 12, wl, F_MONO);
+      text(VX, y + BASE, wl, F_MONO);
       String reset = clock && w.resetsAt > 0 ? span(max(0L, (long)(w.resetsAt - now))) : String();
       bar(VX + (wl.length() + 1) * CW, w.used / 100.0f, pad(String(w.used) + "%", 4) + pad(reset, 7),
           w.used >= 90 ? color::BLOCKED : color::FG, w.used >= 90);
@@ -1238,7 +1283,7 @@ void drawHome(Gateway& gw, Agents& agents) {
     int x = VX;
     auto part = [&](const String& t, uint16_t c) {
       if (x + (int)t.length() * CW > RX) return;
-      text(x, y + 12, t, F_MONO, c);
+      text(x, y + BASE, t, F_MONO, c);
       x += (t.length() + 1) * CW;
     };
     if (!agents.loaded()) part("loading...", color::MUTED);
@@ -1282,7 +1327,7 @@ void drawHome(Gateway& gw, Agents& agents) {
 
   // This device.
   rule();
-  label("M9");
+  label(BOARD_NAME);
   {
     float volts = analogReadMilliVolts(PIN_BATTERY_ADC) * BATTERY_DIVIDER / 1000.0f;
     char v[48];
@@ -1293,6 +1338,7 @@ void drawHome(Gateway& gw, Agents& agents) {
 #endif
     value(s);
   }
+  footer("Menu", "Sessions", "", "");
 }
 #endif
 
@@ -1810,13 +1856,6 @@ bool menuInput(Buttons& b) {
       screen = Screen::Hosts;
       break;
     case M_DEVICE: screen = Screen::Device; break;
-    case M_FLIP:
-#if !defined(PREVIEW_COMPACT)  // the preview is pinned landscape; don't save its flip for the X4 build
-      rotation = rotation == 1 ? 3 : 1;
-      settings::saveRotation(rotation);
-#endif
-      lastView = View::None;  // redraw all of it, the other way up
-      break;
     case M_SCREEN: {
       const size_t n = sizeof(settings::SCREEN_TIMEOUTS) / sizeof(settings::SCREEN_TIMEOUTS[0]);
       size_t i = 0;
@@ -1935,8 +1974,11 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
 #endif
     case View::List: {
       int per = rowsPerPage();
-      if (b.wasPressed(BTN_BACK)) openMenu();
-      else if (b.wasPressed(BTN_DOWN)) moveCursor(agents, 1);
+      if (b.wasPressed(BTN_BACK)) {
+        // Without a Home key, Back is the way to the dashboard (and from it, the menu).
+        if (HAS_DASHBOARD && !HAS_KEYBOARD) screen = HOME;
+        else openMenu();
+      } else if (b.wasPressed(BTN_DOWN)) moveCursor(agents, 1);
       else if (b.wasPressed(BTN_UP)) moveCursor(agents, -1);
       else if (b.wasPressed(BTN_RIGHT)) moveCursor(agents, per - cursor % per);
       else if (b.wasPressed(BTN_LEFT)) moveCursor(agents, -(cursor % per) - (cursor >= per ? per : 0));
@@ -1949,6 +1991,8 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
     }
     case View::Detail: {
 #if HAS_TRANSCRIPT
+      // With a keyboard, Up/Down scroll a couple of lines and a quick second
+      // tap pages; on e-paper every move is a refresh, so each press pages.
       const int STEP = 2;
       if (b.wasPressed(BTN_BACK)) {
         if (draft.length()) deleteLast(draft);
@@ -1959,9 +2003,17 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
           agents.setDismissed(selectedId, false);
           openCard(Screen::Detail);
         } else return false;
+#if !HAS_KEYBOARD
+      } else if (b.wasPressed(BTN_RIGHT)) {
+        int i = agents.indexOf(selectedId);
+        if (i < 0 || !hasSession(agents[i])) return false;
+        menuSel = 0;
+        canned = settings::prompts();
+        screen = Screen::Prompts;
+#endif
       } else if (b.wasPressed(BTN_UP) || b.wasPressed(BTN_DOWN)) {
         int dir = b.wasPressed(BTN_DOWN) ? 1 : -1;
-        bool page = dir == trLastDir && b.eventAt() - trLastDirAt < DOUBLE_TAP_MS;
+        bool page = DISPLAY_EPAPER || (dir == trLastDir && b.eventAt() - trLastDirAt < DOUBLE_TAP_MS);
         trLastDir = dir;
         trLastDirAt = b.eventAt();
         int step = page ? max(1, trRows - 1) : STEP;
@@ -2019,8 +2071,6 @@ bool handleInput(View view, Gateway& gw, Agents& agents, Buttons& b) {
 void begin() {
 #ifdef PREVIEW_COMPACT
   rotation = 0;  // landscape, so the M9's layout sits the right way round
-#else
-  rotation = settings::rotation();
 #endif
   panel::begin(rotation);
   screenTimeoutS = settings::screenTimeout();
@@ -2076,7 +2126,7 @@ View viewFor(LinkState st, Agents& agents) {
 }
 
 static void updateLocked(Gateway& gw, Agents& agents, Buttons& buttons, bool changed) {
-  buttons.setSwapUpDown(rotation == 1);
+  buttons.setUpsideDown(!LAYOUT_COMPACT);  // the X4, keys above the screen
   Gateway::Result result;
   if (gw.takeResult(result)) {
     finishSend(result);
@@ -2157,7 +2207,9 @@ static void updateLocked(Gateway& gw, Agents& agents, Buttons& buttons, bool cha
 
   statusDirty |= gw.takeStatusUpdate();
 #if HAS_TRANSCRIPT
-  if (gw.takeTranscriptUpdate() && view == View::Detail) dirty = true;
+  if (gw.takeTranscriptUpdate() && view == View::Detail) trPending = true;
+  // A working agent appends often; on e-paper, gather a few seconds of it per refresh.
+  if (trPending && (!DISPLAY_EPAPER || now - lastDrawAt >= TRANSCRIPT_REDRAW_MS)) dirty = true;
 #endif
   if (statusDirty && view == View::Detail) {
     int i = agents.indexOf(selectedId);
@@ -2215,6 +2267,7 @@ static void updateLocked(Gateway& gw, Agents& agents, Buttons& buttons, bool cha
   lastMinute = minute;
   lastDrawAt = millis();
   pending = false;
+  trPending = false;
   if (view == View::Detail) statusDirty = false;
 
 

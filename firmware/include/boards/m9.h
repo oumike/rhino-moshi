@@ -80,9 +80,6 @@ enum KbCode : uint8_t {
   KB_RIGHT = 0xB7,
 };
 
-// No physical key layout to point at: the footer shows key names instead.
-static const uint8_t BOTTOM_ROW_ORDER[4] = {BTN_BACK, BTN_CONFIRM, BTN_LEFT, BTN_RIGHT};
-
 // ---------------------------------------------------------------------------
 // Power
 // ---------------------------------------------------------------------------
@@ -91,11 +88,10 @@ static const uint8_t BOTTOM_ROW_ORDER[4] = {BTN_BACK, BTN_CONFIRM, BTN_LEFT, BTN
 static const float BATTERY_DIVIDER = 2.0f;
 
 // ---------------------------------------------------------------------------
-// Panel geometry: native 240x320 portrait, used landscape. 1 and 3 are the two
-// landscape rotations; Flip screen in the menu swaps them. 1 (MADCTL 0xA0)
-// puts the keyboard below the screen; camillia-mt's LovyanGFX rotation 3 is
-// the same register value.
+// Panel geometry: native 240x320 portrait, used landscape. Rotation 1 (MADCTL
+// 0xA0) puts the keyboard below the screen; camillia-mt's LovyanGFX rotation 3
+// is the same register value.
 // ---------------------------------------------------------------------------
 #define PANEL_NATIVE_WIDTH  240
 #define PANEL_NATIVE_HEIGHT 320
-#define DEFAULT_ROTATION    1
+#define PANEL_ROTATION      1

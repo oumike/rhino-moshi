@@ -48,14 +48,15 @@ enum ButtonIndex : uint8_t {
 #define CAN_COMPOSE HAS_KEYBOARD
 #endif
 
-// Boards with a keyboard, color screen and PSRAM show the watched agent's
-// scrollable conversation transcript and compose prompts inline (M9).
+// The agent page is the watched agent's scrollable conversation transcript,
+// and the device boots to a host dashboard. With a keyboard (M9) prompts are
+// composed inline under it; the X4 shows it read-only.
 #ifndef HAS_TRANSCRIPT
 #define HAS_TRANSCRIPT HAS_KEYBOARD
 #endif
 
-// The M9's Home dashboard shows the host's CPU and memory, read by running
-// top over SSH. Its key's forced command is that top instead of "false", so
+// The Home dashboard shows the host's CPU and memory, read by running top
+// over SSH. Its key's forced command is that top instead of "false", so
 // it still can't run anything else.
 #ifndef HAS_HOST_STATS
 #define HAS_HOST_STATS HAS_TRANSCRIPT
